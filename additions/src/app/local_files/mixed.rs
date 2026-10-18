@@ -73,22 +73,41 @@ impl App {
             return None;
         }
         if let RowContext::Context { uri, .. } = context {
-            let page = uri
+            let Some(page) = uri
                 .strip_prefix("spotify:playlist:")
-                .and_then(|id| self.playlist_pages.get(id))?;
+                .and_then(|id| self.playlist_pages.get(id))
+            else {
+                log::info!("mixed: {uri} is not open, so its order is Spotify's");
+                return None;
+            };
             let loaded = page.items.base_offset == 0
                 && page
                     .items
                     .total
-                    .is_some_and(|total| total as usize == page.items.items.len());
+                    .is_none_or(|total| total as usize <= page.items.items.len());
             if !loaded {
+                log::info!(
+                    "mixed: {uri} is not all loaded (from {}, {} of {:?})",
+                    page.items.base_offset,
+                    page.items.items.len(),
+                    page.items.total
+                );
                 return None;
             }
         }
         let rows = self.list_rows(context);
-        rows.iter()
-            .any(|uri| is_local(uri) && self.local_files.find_uri(uri).is_some())
-            .then_some(rows)
+        let locals = rows.iter().filter(|uri| is_local(uri)).count();
+        let found = rows
+            .iter()
+            .filter(|uri| is_local(uri) && self.local_files.find_uri(uri).is_some())
+            .count();
+        if locals > 0 {
+            log::info!(
+                "mixed: list of {} rows, {locals} local, {found} found here",
+                rows.len()
+            );
+        }
+        (found > 0).then_some(rows)
     }
 
     fn context_uri_of(context: &RowContext) -> Option<String> {
@@ -110,6 +129,7 @@ impl App {
         ctx: &egui::Context,
     ) {
         let start = start.filter(|&index| index < rows.len());
+        log::info!("mixed: start at {start:?}, shuffle {shuffle}");
         let (order, index) = if shuffle {
             let first = start.map(|index| rows[index].clone());
             (shuffled(rows.clone(), first), 0)
@@ -139,6 +159,9 @@ impl App {
 
     /// Leaves the app's order; what plays next is up to whoever asked.
     pub(crate) fn end_mixed(&mut self, ctx: &egui::Context) {
+        if self.local_files.mixed.is_some() {
+            log::info!("mixed: left the order");
+        }
         if self.local_files.mixed.take().is_some() && self.local_files.repeat != Repeat::Off {
             let repeat = self.local_files.repeat;
             self.local_send(ctx, LocalCommand::SetRepeat(repeat));
@@ -156,8 +179,14 @@ impl App {
             return;
         }
         let uri = mixed.order[index].clone();
+        log::info!(
+            "mixed: play {index} of {} ({})",
+            mixed.order.len(),
+            if is_local(&uri) { "local" } else { "Spotify" }
+        );
         if is_local(&uri) {
             let Some(track) = self.local_files.find_uri(&uri) else {
+                log::info!("mixed: local song {index} is not in the library: skipped");
                 // Not on this computer: skipped, as Spotify skips it.
                 self.mixed_play(index + 1, 0, ctx);
                 return;
@@ -226,6 +255,7 @@ impl App {
     /// The end of the order: around again with repeat, else Autoplay when
     /// it is on, else everything stays paused.
     fn mixed_finish(&mut self, ctx: &egui::Context) {
+        log::info!("mixed: the order ended");
         let Some(mixed) = self.local_files.mixed.as_ref() else {
             return;
         };
@@ -333,6 +363,12 @@ impl App {
         };
         let seen_near_end = near_end(&self.local) || near_end(state);
         let index = mixed.index;
+        log::info!(
+            "mixed: Spotify {:?} {} at {}ms (place {index} in {start}..{end}, near end {seen_near_end})",
+            state.playback,
+            state.track.as_ref().map_or("-", |track| track.uri.as_str()),
+            state.position_now()
+        );
         let current = state.track.as_ref().map(|track| track.uri.clone());
         let previous = self.local.track.as_ref().map(|track| track.uri.clone());
         let Some(mixed) = self.local_files.mixed.as_mut() else {
@@ -350,6 +386,7 @@ impl App {
             && state.position_ms < END_SLACK_MS;
         let changed = current.is_some() && current != previous;
         if ended && index == end - 1 && (stopped || changed) {
+            log::info!("mixed: the Spotify stretch ended; next is {end}");
             mixed.near_end_at = None;
             mixed.segment = None;
             mixed.pending = Some(Step::Play(end));
