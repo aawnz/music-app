@@ -1,0 +1,27 @@
+name: Remove older releases
+
+# Keeps only the newest release. Builds do this on their own; this runs it
+# by hand without building.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Remove all but the latest release
+        run: |
+          latest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          echo "Keeping $latest"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' |
+            while read -r tag; do
+              if [ -n "$latest" ] && [ "$tag" != "$latest" ]; then
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+                echo "Removed $tag"
+              fi
+            done
