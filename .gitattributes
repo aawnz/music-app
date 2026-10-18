@@ -1,0 +1,3 @@
+# Keep every file byte for byte: the patch must match Spotifast's
+# Unix line endings, even when the Windows build checks this repository out.
+* -text

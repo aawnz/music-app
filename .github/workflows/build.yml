@@ -28,7 +28,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       build: ${{ steps.version.outputs.build }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,7 +61,7 @@ jobs:
       CMAKE_GENERATOR: Ninja
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: fork
 
@@ -129,7 +129,7 @@ jobs:
             "/DOutputDir=$PWD\dist" packaging\windows\spotifast.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows
           path: |
@@ -145,7 +145,7 @@ jobs:
       VERSION: ${{ needs.check.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: windows
           path: dist
@@ -169,7 +169,7 @@ jobs:
     if: github.event_name == 'schedule' && github.event.schedule == '23 */2 * * *'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: |
           stamp=$(date -u +%Y-%m)
           if [ "$(cat .keepalive 2> /dev/null)" != "$stamp" ]; then
