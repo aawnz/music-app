@@ -717,8 +717,17 @@ fn transport(app: &mut App, ui: &mut egui::Ui, region: Rect) {
     let palette = app.palette;
     let cy = region.center().y - 8.0;
     let playing = app.local_files.shown_playing();
-    let shuffle = app.local_files.shuffle;
-    let repeat = app.local_files.repeat;
+    // In a playlist's order, shuffle is the order's and repeat Spotify's.
+    let shuffle = app.mixed_shuffle().unwrap_or(app.local_files.shuffle);
+    let repeat = if app.mixed_shuffle().is_some() {
+        match app.local.repeat {
+            crate::player::RepeatMode::Off => Repeat::Off,
+            crate::player::RepeatMode::Context => Repeat::All,
+            crate::player::RepeatMode::Track => Repeat::One,
+        }
+    } else {
+        app.local_files.repeat
+    };
     let dim = palette.secondary;
 
     let widths = [29.0, 30.0, 36.0, 30.0, 29.0];

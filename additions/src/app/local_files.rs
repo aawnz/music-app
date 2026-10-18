@@ -107,6 +107,8 @@ pub struct RunPlan {
     run: Option<LocalRun>,
 }
 
+mod mixed;
+
 #[derive(Default)]
 pub struct LocalFiles {
     loaded: bool,
@@ -148,6 +150,8 @@ pub struct LocalFiles {
     pending_run: Option<LocalRun>,
     /// The playlist rows the local songs playing came from.
     run: Option<LocalRun>,
+    /// A playlist with local files, in the order the app keeps.
+    mixed: Option<mixed::MixedQueue>,
     /// Pushed by the views, applied after the frame.
     pub actions: Vec<LocalAction>,
     /// Counts changes to `tracks`, so the index below knows to rebuild.
@@ -413,6 +417,7 @@ impl App {
         }
         self.poll_local_player(ctx);
         self.local_handoff_frame(ctx);
+        self.mixed_frame(ctx);
         // Spotify starting on its own (from a phone, the tray or Connect)
         // takes the bar back.
         let spotify_playing = self.spotify_playing();
@@ -515,6 +520,10 @@ impl App {
     /// Watches the planned Spotify song: when it ends on its own, the local
     /// songs after it play; when the listener picks another, it plans again.
     pub(crate) fn local_handoff_track(&mut self, state: &LocalState) {
+        if self.mixed_active() {
+            self.mixed_track(state);
+            return;
+        }
         let Some(waiting) = self
             .local_files
             .plan
@@ -737,6 +746,9 @@ impl App {
     }
 
     fn apply_local_action(&mut self, action: LocalAction, ctx: &egui::Context) {
+        if self.mixed_take_local(&action, ctx) {
+            return;
+        }
         match action {
             LocalAction::AddFolder => self.pick_local_folder(ctx),
             LocalAction::AddFolderPath(path) => self.add_local_folder(path, ctx),
@@ -850,6 +862,9 @@ impl App {
                 self.add_local_to_playlist(playlist_id, name, uris);
             }
             LocalAction::PlayRow { context, start } => {
+                if self.mixed_play_row(&context, &start, ctx) {
+                    return;
+                }
                 // The song, the local songs right after it, then the rest of
                 // the list on Spotify. The row plays alone when its list is
                 // not loaded.
@@ -965,8 +980,12 @@ impl App {
         action: Action,
         ctx: &egui::Context,
     ) -> Option<Action> {
-        // Local files leave a playlist through the playlist service; the
-        // rest of the rows go the usual way.
+        let action = self.mixed_take(action, ctx)?;
+        // One repeat for a playlist's whole order, Spotify's, whichever
+        // player has the bar.
+        if self.mixed_active() && matches!(action, Action::CycleRepeat | Action::SetRepeat(_)) {
+            return Some(action);
+        }
         // Next on a Spotify song with local songs after it plays them.
         if matches!(action, Action::Next)
             && !self.local_files.active
@@ -982,6 +1001,8 @@ impl App {
             ctx.request_repaint();
             return None;
         }
+        // Local files leave a playlist through the playlist service; the
+        // rest of the rows go the usual way.
         let action = match action {
             Action::RemoveFromPlaylist { playlist_id, uris }
                 if uris.iter().any(|uri| uri.starts_with("spotify:local:")) =>
