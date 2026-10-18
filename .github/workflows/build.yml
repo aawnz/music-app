@@ -1,0 +1,182 @@
+name: Build
+
+# Every two hours: is there a new Spotifast release, or a new revision of
+# Local Files? If so, build it for Windows and publish it here, where the
+# app's own updater finds it.
+on:
+  schedule:
+    - cron: "23 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: "Build again even if this version is already released"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream: ${{ steps.version.outputs.upstream }}
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          upstream=$(gh api repos/crmne/spotifast/releases/latest --jq .tag_name)
+          IFS=. read -r major minor patch <<< "${upstream#v}"
+          revision=$(tr -d '[:space:]' < REVISION)
+          # A plain x.y.z the updater accepts, newer for every upstream
+          # release and every Local Files revision: 0.13.3 rev 2 -> 0.13.302.
+          version="$major.$minor.$((patch * 100 + revision))"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 \
+             && [ "${{ inputs.rebuild }}" != "true" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "v$version is already released."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Building v$version from crmne/spotifast $upstream."
+          fi
+
+  windows:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    env:
+      UPSTREAM: ${{ needs.check.outputs.upstream }}
+      VERSION: ${{ needs.check.outputs.version }}
+      TARGET: x86_64-pc-windows-msvc
+      CMAKE_GENERATOR: Ninja
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+
+      - name: Spotifast source
+        shell: bash
+        run: |
+          git -c core.autocrlf=false clone --depth 1 --branch "$UPSTREAM" https://github.com/crmne/spotifast src
+          base=$(tr -d '[:space:]' < fork/patch-base.txt)
+          if [ "$base" != "$UPSTREAM" ]; then
+            git -C src fetch --depth 1 origin "refs/tags/$base:refs/tags/$base" || true
+          fi
+
+      - name: Add Local Files
+        shell: bash
+        run: |
+          cp -r fork/additions/. src/
+          git -C src apply --3way --whitespace=nowarn ../fork/local-files.patch \
+            || { echo "::error::local-files.patch no longer fits Spotifast $UPSTREAM. Update the patch."; exit 1; }
+          python fork/scripts/prepare.py src "$VERSION" "$GITHUB_REPOSITORY"
+
+      - name: Rust
+        shell: bash
+        working-directory: src
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target "$TARGET"
+
+      # MilkDrop's libprojectM reads OpenGL through GLEW, as in Spotifast's
+      # own release build.
+      - name: GLEW for MilkDrop
+        run: vcpkg install glew:x64-windows-static
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        shell: pwsh
+        working-directory: src
+        run: |
+          cargo build --release --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::The build with MilkDrop failed; building without it."
+            cargo build --release --target $env:TARGET --no-default-features
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $reported = (& "target\$env:TARGET\release\spotifast.exe" --version | Out-String).Trim()
+          if ($reported -ne "spotifast $env:VERSION") { throw "The build reports '$reported'" }
+
+      - name: Package
+        shell: pwsh
+        working-directory: src
+        run: |
+          $name = "spotifast-v$env:VERSION-$env:TARGET"
+          New-Item -ItemType Directory -Force "dist\$name" | Out-Null
+          Copy-Item "target\$env:TARGET\release\spotifast.exe", README.md, LICENSE, packaging\spotifast-portable.txt "dist\$name\"
+          Push-Location dist
+          7z a "$name.zip" $name
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DVersion=$env:VERSION" "/DArch=x86_64" `
+            "/DBinary=$PWD\target\$env:TARGET\release\spotifast.exe" `
+            "/DOutputDir=$PWD\dist" packaging\windows\spotifast.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            src/dist/*.zip
+            src/dist/*-setup.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [check, windows]
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM: ${{ needs.check.outputs.upstream }}
+      VERSION: ${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: dist
+      - name: Release
+        working-directory: dist
+        run: |
+          sha256sum -- * > checksums.txt
+          cat checksums.txt
+          notes="Spotifast $UPSTREAM (from [crmne/spotifast](https://github.com/crmne/spotifast/releases/tag/$UPSTREAM)) with a Local Files page added.
+
+          **New install:** download the \`-setup.exe\` below and run it. Already installed? Spotifast updates itself.
+
+          Unofficial build. Spotify playback needs Premium."
+          gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2> /dev/null || true
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Spotifast $VERSION with Local Files" --notes "$notes" -- *
+
+  # GitHub turns off scheduled builds in a repository without commits for
+  # 60 days. A monthly note keeps this one on while Spotifast is quiet.
+  keepalive:
+    if: github.event_name == 'schedule' && github.event.schedule == '23 */2 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          stamp=$(date -u +%Y-%m)
+          if [ "$(cat .keepalive 2> /dev/null)" != "$stamp" ]; then
+            echo "$stamp" > .keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .keepalive
+            git commit -m "Keep scheduled builds on ($stamp)"
+            git push
+          fi
