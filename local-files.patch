@@ -15,7 +15,7 @@ index fd708c1..0707433 100644
  # update checks. HTTP proxies work without it. `system-proxy` reads the OS
  # proxy on macOS and Windows when the mode is System; Linux uses environment
 diff --git a/src/app.rs b/src/app.rs
-index ceea55b..46a6151 100644
+index ceea55b..deb9283 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -669,6 +669,10 @@ pub struct App {
@@ -62,24 +62,21 @@ index ceea55b..46a6151 100644
          if self
              .local_transfer_sequence
              .is_some_and(|sequence| sequence != state.track_sequence)
-@@ -2662,8 +2671,16 @@ impl App {
+@@ -2662,7 +2671,13 @@ impl App {
          {
              controls.seeked(Duration::from_millis(u64::from(state.position_ms)));
          }
 +        // A playlist's local file: Spotify skips it, and Local Files plays
-+        // it from this computer when it has it.
++        // it from this computer when the song before it ends (see
++        // `local_handoff_track`). No error to show.
          if let Some(error) = &state.error
-             && self.local.error.as_deref() != Some(error.as_str())
-+            && let Some(uri) = error.strip_prefix("This item isn't available: ")
-+            && uri.starts_with("spotify:local:")
++            && error.starts_with("This item isn't available: spotify:local:")
 +        {
-+            self.local_handoff(uri, &state);
 +        } else if let Some(error) = &state.error
-+            && self.local.error.as_deref() != Some(error.as_str())
+             && self.local.error.as_deref() != Some(error.as_str())
          {
              self.toast_error(engine_error_text(self.locale, error));
-             // One unavailable track is Spotify's catalogue; several in a
-@@ -4547,6 +4564,7 @@ impl App {
+@@ -4547,6 +4562,7 @@ impl App {
                  }
              }
              Page::Settings => {}
@@ -87,7 +84,7 @@ index ceea55b..46a6151 100644
          }
      }
  
-@@ -9462,6 +9480,11 @@ impl App {
+@@ -9462,6 +9478,11 @@ impl App {
      /// Apply one queued UI action after drawing, updating optimistic local state
      /// and scheduling any backend work or preference persistence it requires.
      pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
@@ -99,7 +96,7 @@ index ceea55b..46a6151 100644
          if matches!(
              &action,
              Action::Open(_)
-@@ -10998,6 +11021,7 @@ impl App {
+@@ -10998,6 +11019,7 @@ impl App {
          #[cfg(feature = "milkdrop")]
          self.sync_milkdrop(ctx);
          self.apply_actions(ctx);
@@ -107,7 +104,7 @@ index ceea55b..46a6151 100644
          self.sync_media_controls(ctx);
          self.sync_window_title(ctx);
          self.remember_geometry(ctx);
-@@ -11329,6 +11353,7 @@ impl App {
+@@ -11329,6 +11351,7 @@ impl App {
              crate::ui::show(self, ui);
          }
          self.apply_actions(ctx);
@@ -115,7 +112,7 @@ index ceea55b..46a6151 100644
          let autoscroll = self.autoscroll.finish(
              ctx,
              crate::autoscroll::enabled(self.settings.middle_click_autoscroll),
-@@ -11975,6 +12000,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
+@@ -11975,6 +11998,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
      }
  }
  

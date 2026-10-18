@@ -418,52 +418,62 @@ impl App {
         }
     }
 
-    /// Spotify reached a playlist's local file, which it cannot play: it
-    /// skips it, and the song plays here instead when Local Files has it.
-    /// Skips that come together (several local songs in a row) play as one
-    /// run, then Spotify carries on.
-    pub(crate) fn local_handoff(&mut self, uri: &str, state: &LocalState) {
-        // librespot loads the next song early, while this one plays. A
-        // local song fails that early load; Spotify then skips it without
-        // a word when this song ends, which is when it plays here.
-        let preload = state.position_at.is_some()
-            || (state.playback == Playback::Paused && state.position_ms > 0);
-        if preload {
-            let Some(current) = state.track.as_ref().map(|track| track.uri.clone()) else {
-                return;
-            };
-            let Some(track) = self.local_files.find_uri(uri) else {
-                return;
-            };
-            if self.local_files.handoff_after.as_deref() != Some(current.as_str()) {
-                self.local_files.handoff_queued.clear();
-                self.local_files.handoff_near_end_at = None;
-                self.local_files.handoff_after = Some(current);
-            }
-            self.local_files.handoff_queued.push(track);
+    /// The local songs that follow `uri` in the list Spotify is playing,
+    /// up to the next Spotify song: what plays here when `uri` ends.
+    /// Spotify cannot play them and skips them. A shuffled list has no
+    /// known next song, so nothing is planned for it.
+    fn local_songs_after(&self, uri: &str) -> Vec<LocalTrack> {
+        if self.playing_context_shuffle() {
+            return Vec::new();
+        }
+        let uris: Vec<String> = if let Some(list) = &self.local_list {
+            list.clone()
+        } else if let Some(page) = self
+            .playing_context_uri()
+            .as_deref()
+            .and_then(|context| context.strip_prefix("spotify:playlist:"))
+            .and_then(|id| self.playlist_pages.get(id))
+        {
+            page.items
+                .items
+                .iter()
+                .filter_map(|row| row.playable().map(|item| item.uri().to_string()))
+                .collect()
+        } else {
+            return Vec::new();
+        };
+        let Some(position) = uris.iter().position(|held| held == uri) else {
+            return Vec::new();
+        };
+        uris[position + 1..]
+            .iter()
+            .take_while(|held| held.starts_with("spotify:local:"))
+            .filter_map(|held| self.local_files.find_uri(held))
+            .collect()
+    }
+
+    /// Plans the local songs after the Spotify song that just started.
+    fn plan_local_handoff(&mut self, state: &LocalState) {
+        if state.playback != Playback::Playing || self.local_files.active {
             return;
         }
-        let Some(track) = self.local_files.find_uri(uri) else {
-            let title = crate::extras::parse_local_uri(uri)
-                .map(|(_, _, title, _)| title)
-                .filter(|title| !title.is_empty())
-                .unwrap_or_else(|| "a local song".into());
-            self.toast(format!(
-                "Skipped {title}: it isn't in your Local Files folders."
-            ));
+        let Some(current) = state.track.as_ref().map(|track| track.uri.clone()) else {
             return;
         };
-        if self.spotify_playing() {
-            self.toggle_play();
+        if self.local_files.handoff_after.as_deref() == Some(current.as_str()) {
+            return;
         }
-        self.local_files.handoff.push(track);
-        self.local_files.handoff_at = Some(Instant::now());
+        // Planned once per song, even when nothing local follows it.
+        self.local_files.handoff_queued = self.local_songs_after(&current);
+        self.local_files.handoff_near_end_at = None;
+        self.local_files.handoff_after = Some(current);
     }
 
     /// Watches the song the queued local songs follow: when it ends on its
     /// own they play; when the listener skips or picks another, they don't.
     pub(crate) fn local_handoff_track(&mut self, state: &LocalState) {
         let Some(waiting) = self.local_files.handoff_after.clone() else {
+            self.plan_local_handoff(state);
             return;
         };
         // The song was seen playing into its last seconds. Spotify's
@@ -493,11 +503,18 @@ impl App {
             state.track.as_ref().map(|track| track.uri.as_str()) == Some(waiting.as_str());
         // At the end of a list whose last songs are local, Spotify stops on
         // its last song, back at the start, instead of moving on.
-        let list_ended = same_track
-            && previous_near_end
+        let list_ended = previous_near_end
             && matches!(state.playback, Playback::Paused | Playback::Stopped)
             && state.position_ms < HANDOFF_END_SLACK_MS;
         if same_track && !list_ended {
+            return;
+        }
+        // A song the listener chose, or the song after the local ones:
+        // plan for it instead.
+        if !previous_near_end {
+            self.local_files.handoff_after = None;
+            self.local_files.handoff_queued.clear();
+            self.plan_local_handoff(state);
             return;
         }
         let ended = previous_near_end;
@@ -513,6 +530,8 @@ impl App {
             self.local_files.handoff_list_ended = list_ended;
             // Play at once: Spotify has already moved past them.
             self.local_files.handoff_at = Some(Instant::now() - HANDOFF_GATHER);
+        } else {
+            self.plan_local_handoff(state);
         }
     }
 
