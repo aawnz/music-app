@@ -21,10 +21,10 @@ const OPTIMISTIC_HOLD: Duration = Duration::from_millis(1500);
 /// Spotify starting to play within this long of a local song starting is
 /// the pause we sent catching up, not the listener switching back.
 const SWITCH_GRACE: Duration = Duration::from_secs(5);
-/// How long to wait for more local songs Spotify skips in a row.
-const HANDOFF_GATHER: Duration = Duration::from_millis(800);
 /// A song this close to its end when the next starts ended on its own.
 const HANDOFF_END_SLACK_MS: u32 = 5_000;
+/// Previous restarts a song played longer than this, as Spotify does.
+const PREVIOUS_RESTART_MS: u32 = 3_000;
 /// How long that sighting counts while Spotify moves to what follows.
 const HANDOFF_END_MEMORY: Duration = Duration::from_secs(15);
 
@@ -87,6 +87,26 @@ pub enum LocalAction {
     },
 }
 
+/// Consecutive local songs in a Spotify list, `uris[start..end]`, and how
+/// Spotify plays the rest of that list.
+#[derive(Clone)]
+pub struct LocalRun {
+    context: RowContext,
+    uris: Vec<String>,
+    start: usize,
+    end: usize,
+    /// With no Spotify song after the run, Spotify resumes what it had
+    /// moved on to (Autoplay) instead of stopping.
+    resume_spotify: bool,
+}
+
+/// What follows the Spotify song `after` before the next Spotify song.
+#[derive(Clone)]
+pub struct RunPlan {
+    after: String,
+    run: Option<LocalRun>,
+}
+
 #[derive(Default)]
 pub struct LocalFiles {
     loaded: bool,
@@ -120,20 +140,14 @@ pub struct LocalFiles {
     pub cover: Option<(u64, egui::TextureHandle)>,
     error_serial: u64,
     spotify_was_playing: bool,
-    /// Local songs Spotify skipped in a playlist, gathered for a moment
-    /// before they play here, and when the last skip came.
-    handoff: Vec<LocalTrack>,
-    handoff_at: Option<Instant>,
-    /// Local songs librespot failed to load early, and the Spotify song
-    /// they come after.
-    handoff_queued: Vec<LocalTrack>,
-    handoff_after: Option<String>,
-    /// The gathered songs end Spotify's list, so nothing follows them.
-    handoff_list_ended: bool,
-    /// When the song they follow was last seen in its final seconds.
-    handoff_near_end_at: Option<Instant>,
-    /// Spotify continues when the handed-over songs end.
-    resume_spotify: bool,
+    /// The local songs planned after the Spotify song that is playing.
+    plan: Option<RunPlan>,
+    /// When that Spotify song was last seen in its final seconds.
+    plan_near_end_at: Option<Instant>,
+    /// A run of a playlist's local songs, started on the next frame.
+    pending_run: Option<LocalRun>,
+    /// The playlist rows the local songs playing came from.
+    run: Option<LocalRun>,
     /// Pushed by the views, applied after the frame.
     pub actions: Vec<LocalAction>,
     /// Counts changes to `tracks`, so the index below knows to rebuild.
@@ -367,6 +381,7 @@ impl App {
             return;
         }
         self.local_files.active = false;
+        self.local_files.run = None;
         self.local_files.optimistic_playing = None;
         self.local_files.expected = None;
         if let Some(player) = &self.local_files.player {
@@ -418,41 +433,62 @@ impl App {
         }
     }
 
-    /// The local songs that follow `uri` in the list Spotify is playing,
-    /// up to the next Spotify song: what plays here when `uri` ends.
-    /// Spotify cannot play them and skips them. A shuffled list has no
-    /// known next song, so nothing is planned for it.
-    fn local_songs_after(&self, uri: &str) -> Vec<LocalTrack> {
-        if self.playing_context_shuffle() {
-            return Vec::new();
+    /// A list's rows in order, as Spotify plays them.
+    fn list_rows(&self, context: &RowContext) -> Vec<String> {
+        match context {
+            RowContext::Uris(uris) | RowContext::View { uris, .. } => uris.to_vec(),
+            RowContext::Context { uri, .. } => uri
+                .strip_prefix("spotify:playlist:")
+                .and_then(|id| self.playlist_pages.get(id))
+                .map(|page| {
+                    page.items
+                        .items
+                        .iter()
+                        .filter_map(|row| row.playable().map(|item| item.uri().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            RowContext::Queue => Vec::new(),
         }
-        let uris: Vec<String> = if let Some(list) = &self.local_list {
-            list.clone()
-        } else if let Some(page) = self
-            .playing_context_uri()
-            .as_deref()
-            .and_then(|context| context.strip_prefix("spotify:playlist:"))
-            .and_then(|id| self.playlist_pages.get(id))
-        {
-            page.items
-                .items
-                .iter()
-                .filter_map(|row| row.playable().map(|item| item.uri().to_string()))
-                .collect()
-        } else {
-            return Vec::new();
-        };
-        let Some(position) = uris.iter().position(|held| held == uri) else {
-            return Vec::new();
-        };
-        uris[position + 1..]
-            .iter()
-            .take_while(|held| held.starts_with("spotify:local:"))
-            .filter_map(|held| self.local_files.find_uri(held))
-            .collect()
     }
 
-    /// Plans the local songs after the Spotify song that just started.
+    /// The local songs from `from` up to the next Spotify song.
+    fn run_at(context: RowContext, uris: Vec<String>, from: usize) -> Option<LocalRun> {
+        let end = (from..uris.len())
+            .find(|&index| !uris[index].starts_with("spotify:local:"))
+            .unwrap_or(uris.len());
+        (end > from).then_some(LocalRun {
+            context,
+            uris,
+            start: from,
+            end,
+            resume_spotify: false,
+        })
+    }
+
+    /// The local songs right after `uri` in the list Spotify is playing.
+    /// Spotify cannot play them and skips them, so they play here. A
+    /// shuffled list has no known next song, so nothing is planned.
+    fn run_after(&self, uri: &str) -> Option<LocalRun> {
+        if self.playing_context_shuffle() {
+            return None;
+        }
+        let (context, uris) = if let Some(list) = &self.local_list {
+            (RowContext::Uris(Arc::from(list.clone())), list.clone())
+        } else {
+            let context_uri = self.playing_context_uri()?;
+            let context = RowContext::Context {
+                uri: context_uri,
+                editable_playlist: None,
+            };
+            let uris = self.list_rows(&context);
+            (context, uris)
+        };
+        let position = uris.iter().position(|held| held == uri)?;
+        Self::run_at(context, uris, position + 1)
+    }
+
+    /// Plans for the Spotify song that just started.
     fn plan_local_handoff(&mut self, state: &LocalState) {
         if state.playback != Playback::Playing || self.local_files.active {
             return;
@@ -460,19 +496,31 @@ impl App {
         let Some(current) = state.track.as_ref().map(|track| track.uri.clone()) else {
             return;
         };
-        if self.local_files.handoff_after.as_deref() == Some(current.as_str()) {
+        if self
+            .local_files
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.after == current)
+        {
             return;
         }
-        // Planned once per song, even when nothing local follows it.
-        self.local_files.handoff_queued = self.local_songs_after(&current);
-        self.local_files.handoff_near_end_at = None;
-        self.local_files.handoff_after = Some(current);
+        let run = self.run_after(&current);
+        self.local_files.plan_near_end_at = None;
+        self.local_files.plan = Some(RunPlan {
+            after: current,
+            run,
+        });
     }
 
-    /// Watches the song the queued local songs follow: when it ends on its
-    /// own they play; when the listener skips or picks another, they don't.
+    /// Watches the planned Spotify song: when it ends on its own, the local
+    /// songs after it play; when the listener picks another, it plans again.
     pub(crate) fn local_handoff_track(&mut self, state: &LocalState) {
-        let Some(waiting) = self.local_files.handoff_after.clone() else {
+        let Some(waiting) = self
+            .local_files
+            .plan
+            .as_ref()
+            .map(|plan| plan.after.clone())
+        else {
             self.plan_local_handoff(state);
             return;
         };
@@ -493,73 +541,88 @@ impl App {
                 })
         };
         if near_end(&self.local) || near_end(state) {
-            self.local_files.handoff_near_end_at = Some(Instant::now());
+            self.local_files.plan_near_end_at = Some(Instant::now());
         }
-        let previous_near_end = self
+        let ended = self
             .local_files
-            .handoff_near_end_at
+            .plan_near_end_at
             .is_some_and(|at| at.elapsed() < HANDOFF_END_MEMORY);
         let same_track =
             state.track.as_ref().map(|track| track.uri.as_str()) == Some(waiting.as_str());
         // At the end of a list whose last songs are local, Spotify stops on
         // its last song, back at the start, instead of moving on.
-        let list_ended = previous_near_end
+        let list_ended = ended
             && matches!(state.playback, Playback::Paused | Playback::Stopped)
             && state.position_ms < HANDOFF_END_SLACK_MS;
         if same_track && !list_ended {
             return;
         }
-        // A song the listener chose, or the song after the local ones:
-        // plan for it instead.
-        if !previous_near_end {
-            self.local_files.handoff_after = None;
-            self.local_files.handoff_queued.clear();
-            self.plan_local_handoff(state);
-            return;
-        }
-        let ended = previous_near_end;
-        self.local_files.handoff_after = None;
-        self.local_files.handoff_near_end_at = None;
-        let queued = std::mem::take(&mut self.local_files.handoff_queued);
-        if ended && !queued.is_empty() {
-            if self.spotify_playing() {
-                self.toggle_play();
-            }
-            self.local_files.handoff.extend(queued);
-            // Spotify carries on after them, unless its list is over.
-            self.local_files.handoff_list_ended = list_ended;
-            // Play at once: Spotify has already moved past them.
-            self.local_files.handoff_at = Some(Instant::now() - HANDOFF_GATHER);
+        let plan = self.local_files.plan.take();
+        self.local_files.plan_near_end_at = None;
+        if ended && let Some(mut run) = plan.and_then(|plan| plan.run) {
+            run.resume_spotify = !list_ended;
+            self.local_files.pending_run = Some(run);
         } else {
             self.plan_local_handoff(state);
         }
     }
 
-    fn local_handoff_frame(&mut self, ctx: &egui::Context) {
-        if let Some(at) = self.local_files.handoff_at {
-            if at.elapsed() < HANDOFF_GATHER {
-                theme::repaint_after(ctx, HANDOFF_GATHER);
-            } else {
-                self.local_files.handoff_at = None;
-                let rows = std::mem::take(&mut self.local_files.handoff);
-                if self.spotify_playing() {
+    /// Plays a run of a playlist's local songs. False when none of them is
+    /// in the library.
+    fn start_local_run(&mut self, run: LocalRun, ctx: &egui::Context) -> bool {
+        let tracks: Vec<LocalTrack> = run.uris[run.start..run.end]
+            .iter()
+            .filter_map(|uri| self.local_files.find_uri(uri))
+            .collect();
+        if tracks.is_empty() {
+            return false;
+        }
+        self.play_local_rows(tracks, 0, ctx);
+        self.local_files.run = Some(run);
+        true
+    }
+
+    /// Leaves a run for the Spotify song at `index` of its list. With none,
+    /// Spotify resumes what it moved on to, or everything stays paused.
+    fn continue_on_spotify(&mut self, run: LocalRun, index: Option<usize>, ctx: &egui::Context) {
+        self.deactivate_local_files();
+        match index {
+            Some(index) => self.actions.push(Action::PlayFromRow {
+                context: run.context,
+                uri: run.uris[index].clone(),
+                index: index as u32,
+            }),
+            None if run.resume_spotify => {
+                if !self.spotify_playing() {
                     self.toggle_play();
                 }
-                self.play_local_rows(rows, 0, ctx);
-                self.local_files.resume_spotify =
-                    !std::mem::take(&mut self.local_files.handoff_list_ended);
+            }
+            None => {}
+        }
+        ctx.request_repaint();
+    }
+
+    fn local_handoff_frame(&mut self, ctx: &egui::Context) {
+        if let Some(run) = self.local_files.pending_run.take() {
+            if self.spotify_playing() {
+                self.toggle_play();
+            }
+            if !self.start_local_run(run.clone(), ctx) {
+                // None of them is here: Spotify goes on without them.
+                let next = (run.end..run.uris.len())
+                    .find(|&index| !run.uris[index].starts_with("spotify:local:"));
+                self.continue_on_spotify(run, next, ctx);
             }
         }
-        if self.local_files.resume_spotify
+        if self.local_files.run.is_some()
             && self.local_files.active
             && self.local_files.expected.is_none()
             && self.local_files.status.finished
+            && let Some(run) = self.local_files.run.take()
         {
-            self.local_files.resume_spotify = false;
-            self.deactivate_local_files();
-            if !self.spotify_playing() {
-                self.toggle_play();
-            }
+            let next = (run.end..run.uris.len())
+                .find(|&index| !run.uris[index].starts_with("spotify:local:"));
+            self.continue_on_spotify(run, next, ctx);
         }
     }
 
@@ -709,7 +772,30 @@ impl App {
                 self.local_files.optimistic_playing = Some((true, Instant::now()));
                 self.local_send(ctx, LocalCommand::Next);
             }
-            LocalAction::Previous => self.local_send(ctx, LocalCommand::Previous),
+            LocalAction::Previous => {
+                // At the start of a playlist's first local song, Previous
+                // goes back to the Spotify song before it.
+                let back = self
+                    .local_files
+                    .run
+                    .as_ref()
+                    .filter(|_| {
+                        self.local_files.status.index == 0
+                            && self.local_files.position_ms < PREVIOUS_RESTART_MS
+                    })
+                    .and_then(|run| {
+                        (0..run.start)
+                            .rev()
+                            .find(|&index| !run.uris[index].starts_with("spotify:local:"))
+                    });
+                match (back, self.local_files.run.take()) {
+                    (Some(index), Some(run)) => self.continue_on_spotify(run, Some(index), ctx),
+                    (_, run) => {
+                        self.local_files.run = run;
+                        self.local_send(ctx, LocalCommand::Previous);
+                    }
+                }
+            }
             LocalAction::Seek(ms) => {
                 self.local_files.position_ms = ms;
                 self.local_send(ctx, LocalCommand::Seek(ms));
@@ -764,12 +850,26 @@ impl App {
                 self.add_local_to_playlist(playlist_id, name, uris);
             }
             LocalAction::PlayRow { context, start } => {
-                let mut uris = self.local_uris_in(&context);
-                // The row always plays, even when its list is not loaded.
-                if !uris.contains(&start) {
-                    uris = vec![start.clone()];
+                // The song, the local songs right after it, then the rest of
+                // the list on Spotify. The row plays alone when its list is
+                // not loaded.
+                let uris = self.list_rows(&context);
+                let run = uris
+                    .iter()
+                    .position(|uri| *uri == start)
+                    .and_then(|index| Self::run_at(context, uris, index));
+                match run {
+                    Some(run) if self.local_files.find_uri(&start).is_some() => {
+                        self.start_local_run(run, ctx);
+                    }
+                    _ => self.apply_local_action(
+                        LocalAction::PlayUris {
+                            uris: vec![start.clone()],
+                            start,
+                        },
+                        ctx,
+                    ),
                 }
-                self.apply_local_action(LocalAction::PlayUris { uris, start }, ctx);
             }
             LocalAction::PlayUris { uris, start } => {
                 let mut rows = Vec::new();
@@ -792,35 +892,11 @@ impl App {
         }
     }
 
-    /// The `spotify:local:` URIs among a list's rows, in order: what plays
-    /// from the library when one of them is double-clicked.
-    pub(crate) fn local_uris_in(&self, context: &RowContext) -> Vec<String> {
-        let local = |uri: &String| uri.starts_with("spotify:local:");
-        match context {
-            RowContext::Uris(uris) | RowContext::View { uris, .. } => {
-                uris.iter().filter(|uri| local(uri)).cloned().collect()
-            }
-            RowContext::Context { uri, .. } => uri
-                .strip_prefix("spotify:playlist:")
-                .and_then(|id| self.playlist_pages.get(id))
-                .map(|page| {
-                    page.items
-                        .items
-                        .iter()
-                        .filter_map(|row| row.playable().map(|item| item.uri().to_string()))
-                        .filter(|uri| local(uri))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            RowContext::Queue => Vec::new(),
-        }
-    }
-
     fn play_local_rows(&mut self, rows: Vec<LocalTrack>, index: usize, ctx: &egui::Context) {
         let Some(chosen) = rows.get(index).cloned() else {
             return;
         };
-        self.local_files.resume_spotify = false;
+        self.local_files.run = None;
         self.local_files.base = rows.clone();
         let (queue, start) = if self.local_files.shuffle {
             (shuffled_from(&rows, index), 0)
@@ -891,6 +967,21 @@ impl App {
     ) -> Option<Action> {
         // Local files leave a playlist through the playlist service; the
         // rest of the rows go the usual way.
+        // Next on a Spotify song with local songs after it plays them.
+        if matches!(action, Action::Next)
+            && !self.local_files.active
+            && let Some(run) = self
+                .local_files
+                .plan
+                .as_ref()
+                .filter(|plan| self.current_track_uri().as_deref() == Some(plan.after.as_str()))
+                .and_then(|plan| plan.run.clone())
+        {
+            self.local_files.plan = None;
+            self.local_files.pending_run = Some(run);
+            ctx.request_repaint();
+            return None;
+        }
         let action = match action {
             Action::RemoveFromPlaylist { playlist_id, uris }
                 if uris.iter().any(|uri| uri.starts_with("spotify:local:")) =>
