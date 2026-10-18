@@ -60,6 +60,9 @@ jobs:
       TARGET: x86_64-pc-windows-msvc
       CMAKE_GENERATOR: Ninja
       CARGO_TERM_COLOR: always
+      # Spread the app's own code over more compiler threads: a fix only
+      # recompiles Spotifast itself, and one unit makes that the slow part.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -88,6 +91,14 @@ jobs:
         run: |
           channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
           rustup toolchain install "$channel" --profile minimal --target "$TARGET"
+
+      # Keep compiled libraries between builds, so a fix rebuilds only
+      # Spotifast itself instead of everything.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src -> target
+          shared-key: windows
+          cache-on-failure: true
 
       # MilkDrop's libprojectM reads OpenGL through GLEW, as in Spotifast's
       # own release build.
