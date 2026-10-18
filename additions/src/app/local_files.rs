@@ -23,6 +23,8 @@ const OPTIMISTIC_HOLD: Duration = Duration::from_millis(1500);
 const SWITCH_GRACE: Duration = Duration::from_secs(5);
 /// How long to wait for more local songs Spotify skips in a row.
 const HANDOFF_GATHER: Duration = Duration::from_millis(800);
+/// A song this close to its end when the next starts ended on its own.
+const HANDOFF_END_SLACK_MS: u32 = 5_000;
 
 /// Columns the song list sorts by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -120,6 +122,10 @@ pub struct LocalFiles {
     /// before they play here, and when the last skip came.
     handoff: Vec<LocalTrack>,
     handoff_at: Option<Instant>,
+    /// Local songs librespot failed to load early, and the Spotify song
+    /// they come after.
+    handoff_queued: Vec<LocalTrack>,
+    handoff_after: Option<String>,
     /// Spotify continues when the handed-over songs end.
     resume_spotify: bool,
     /// Pushed by the views, applied after the frame.
@@ -410,7 +416,26 @@ impl App {
     /// skips it, and the song plays here instead when Local Files has it.
     /// Skips that come together (several local songs in a row) play as one
     /// run, then Spotify carries on.
-    pub(crate) fn local_handoff(&mut self, uri: &str) {
+    pub(crate) fn local_handoff(&mut self, uri: &str, state: &LocalState) {
+        // librespot loads the next song early, while this one plays. A
+        // local song fails that early load; Spotify then skips it without
+        // a word when this song ends, which is when it plays here.
+        let preload = state.position_at.is_some()
+            || (state.playback == Playback::Paused && state.position_ms > 0);
+        if preload {
+            let Some(current) = state.track.as_ref().map(|track| track.uri.clone()) else {
+                return;
+            };
+            let Some(track) = self.local_files.find_uri(uri) else {
+                return;
+            };
+            if self.local_files.handoff_after.as_deref() != Some(current.as_str()) {
+                self.local_files.handoff_queued.clear();
+                self.local_files.handoff_after = Some(current);
+            }
+            self.local_files.handoff_queued.push(track);
+            return;
+        }
         let Some(track) = self.local_files.find_uri(uri) else {
             let title = crate::extras::parse_local_uri(uri)
                 .map(|(_, _, title, _)| title)
@@ -426,6 +451,39 @@ impl App {
         }
         self.local_files.handoff.push(track);
         self.local_files.handoff_at = Some(Instant::now());
+    }
+
+    /// Watches the song the queued local songs follow: when it ends on its
+    /// own they play; when the listener skips or picks another, they don't.
+    pub(crate) fn local_handoff_track(&mut self, state: &LocalState) {
+        let Some(waiting) = self.local_files.handoff_after.clone() else {
+            return;
+        };
+        let previous = &self.local;
+        if state.track.as_ref().map(|track| track.uri.as_str()) == Some(waiting.as_str()) {
+            return;
+        }
+        let ended = previous.track.as_ref().is_some_and(|track| {
+            let position =
+                previous
+                    .position_ms
+                    .saturating_add(previous.position_at.map_or(0, |at| {
+                        at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
+                    }));
+            track.uri == waiting
+                && track.duration_ms > 0
+                && position.saturating_add(HANDOFF_END_SLACK_MS) >= track.duration_ms
+        });
+        self.local_files.handoff_after = None;
+        let queued = std::mem::take(&mut self.local_files.handoff_queued);
+        if ended && !queued.is_empty() {
+            if self.spotify_playing() {
+                self.toggle_play();
+            }
+            self.local_files.handoff.extend(queued);
+            // Play at once: Spotify has already moved past them.
+            self.local_files.handoff_at = Some(Instant::now() - HANDOFF_GATHER);
+        }
     }
 
     fn local_handoff_frame(&mut self, ctx: &egui::Context) {
