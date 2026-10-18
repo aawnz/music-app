@@ -73,6 +73,12 @@ pub enum LocalAction {
         uris: Vec<String>,
         start: String,
     },
+    /// Plays a local row of a Spotify list, with the list's other local
+    /// rows after it.
+    PlayRow {
+        context: RowContext,
+        start: String,
+    },
 }
 
 #[derive(Default)]
@@ -588,6 +594,14 @@ impl App {
                     })
                     .collect();
                 self.add_local_to_playlist(playlist_id, name, uris);
+            }
+            LocalAction::PlayRow { context, start } => {
+                let mut uris = self.local_uris_in(&context);
+                // The row always plays, even when its list is not loaded.
+                if !uris.contains(&start) {
+                    uris = vec![start.clone()];
+                }
+                self.apply_local_action(LocalAction::PlayUris { uris, start }, ctx);
             }
             LocalAction::PlayUris { uris, start } => {
                 let mut rows = Vec::new();
