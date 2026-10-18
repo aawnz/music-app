@@ -25,6 +25,8 @@ const SWITCH_GRACE: Duration = Duration::from_secs(5);
 const HANDOFF_GATHER: Duration = Duration::from_millis(800);
 /// A song this close to its end when the next starts ended on its own.
 const HANDOFF_END_SLACK_MS: u32 = 5_000;
+/// How long that sighting counts while Spotify moves to what follows.
+const HANDOFF_END_MEMORY: Duration = Duration::from_secs(15);
 
 /// Columns the song list sorts by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -126,6 +128,10 @@ pub struct LocalFiles {
     /// they come after.
     handoff_queued: Vec<LocalTrack>,
     handoff_after: Option<String>,
+    /// The gathered songs end Spotify's list, so nothing follows them.
+    handoff_list_ended: bool,
+    /// When the song they follow was last seen in its final seconds.
+    handoff_near_end_at: Option<Instant>,
     /// Spotify continues when the handed-over songs end.
     resume_spotify: bool,
     /// Pushed by the views, applied after the frame.
@@ -431,6 +437,7 @@ impl App {
             };
             if self.local_files.handoff_after.as_deref() != Some(current.as_str()) {
                 self.local_files.handoff_queued.clear();
+                self.local_files.handoff_near_end_at = None;
                 self.local_files.handoff_after = Some(current);
             }
             self.local_files.handoff_queued.push(track);
@@ -459,28 +466,51 @@ impl App {
         let Some(waiting) = self.local_files.handoff_after.clone() else {
             return;
         };
-        let previous = &self.local;
-        if state.track.as_ref().map(|track| track.uri.as_str()) == Some(waiting.as_str()) {
+        // The song was seen playing into its last seconds. Spotify's
+        // updates on the way to the next song (loading, a reset position)
+        // come after, so the sighting is remembered for a while.
+        let near_end = |seen: &LocalState| {
+            seen.playback == Playback::Playing
+                && seen.track.as_ref().is_some_and(|track| {
+                    let position =
+                        seen.position_ms
+                            .saturating_add(seen.position_at.map_or(0, |at| {
+                                at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
+                            }));
+                    track.uri == waiting
+                        && track.duration_ms > 0
+                        && position.saturating_add(HANDOFF_END_SLACK_MS) >= track.duration_ms
+                })
+        };
+        if near_end(&self.local) || near_end(state) {
+            self.local_files.handoff_near_end_at = Some(Instant::now());
+        }
+        let previous_near_end = self
+            .local_files
+            .handoff_near_end_at
+            .is_some_and(|at| at.elapsed() < HANDOFF_END_MEMORY);
+        let same_track =
+            state.track.as_ref().map(|track| track.uri.as_str()) == Some(waiting.as_str());
+        // At the end of a list whose last songs are local, Spotify stops on
+        // its last song, back at the start, instead of moving on.
+        let list_ended = same_track
+            && previous_near_end
+            && matches!(state.playback, Playback::Paused | Playback::Stopped)
+            && state.position_ms < HANDOFF_END_SLACK_MS;
+        if same_track && !list_ended {
             return;
         }
-        let ended = previous.track.as_ref().is_some_and(|track| {
-            let position =
-                previous
-                    .position_ms
-                    .saturating_add(previous.position_at.map_or(0, |at| {
-                        at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
-                    }));
-            track.uri == waiting
-                && track.duration_ms > 0
-                && position.saturating_add(HANDOFF_END_SLACK_MS) >= track.duration_ms
-        });
+        let ended = previous_near_end;
         self.local_files.handoff_after = None;
+        self.local_files.handoff_near_end_at = None;
         let queued = std::mem::take(&mut self.local_files.handoff_queued);
         if ended && !queued.is_empty() {
             if self.spotify_playing() {
                 self.toggle_play();
             }
             self.local_files.handoff.extend(queued);
+            // Spotify carries on after them, unless its list is over.
+            self.local_files.handoff_list_ended = list_ended;
             // Play at once: Spotify has already moved past them.
             self.local_files.handoff_at = Some(Instant::now() - HANDOFF_GATHER);
         }
@@ -497,7 +527,8 @@ impl App {
                     self.toggle_play();
                 }
                 self.play_local_rows(rows, 0, ctx);
-                self.local_files.resume_spotify = true;
+                self.local_files.resume_spotify =
+                    !std::mem::take(&mut self.local_files.handoff_list_ended);
             }
         }
         if self.local_files.resume_spotify

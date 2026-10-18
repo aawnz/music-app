@@ -345,7 +345,7 @@ index 82b4ba9..d364fdd 100644
      ui.painter().hline(
          ui.max_rect().x_range().shrink(4.0),
 diff --git a/src/ui/widgets.rs b/src/ui/widgets.rs
-index a742097..15b6a02 100644
+index a742097..ef01361 100644
 --- a/src/ui/widgets.rs
 +++ b/src/ui/widgets.rs
 @@ -526,7 +526,7 @@ pub fn menu_submenu<R>(
@@ -411,7 +411,38 @@ index a742097..15b6a02 100644
      response.widget_info(|| {
          egui::WidgetInfo::selected(
              egui::WidgetType::Button,
-@@ -1940,11 +1971,7 @@ fn track_row_contents(
+@@ -1469,11 +1500,25 @@ fn track_row_contents(
+     // A queue row is a position, not the song itself: the same song can
+     // sit in the queue while it plays (a repeat wrapping around, a song
+     // queued twice), and only the Now playing row is the playing one.
+-    let is_current = !matches!(row.context, RowContext::Queue)
+-        && app
+-            .current_track_uri()
+-            .is_some_and(|uri| uri == row.item.uri());
+-    let playing = is_current && app.believed_playing();
++    // While Local Files has the bar, its song is the playing one: a
++    // playlist's local row lights up, and Spotify's paused song is just a
++    // row that plays when clicked.
++    let (is_current, playing) = if app.local_files.active {
++        let current = local
++            && !matches!(row.context, RowContext::Queue)
++            && app.local_files.shown_track().is_some_and(|shown| {
++                app.local_files
++                    .find_uri(row.item.uri())
++                    .is_some_and(|track| track.path == shown.path)
++            });
++        (current, current && app.local_files.shown_playing())
++    } else {
++        let current = !matches!(row.context, RowContext::Queue)
++            && app
++                .current_track_uri()
++                .is_some_and(|uri| uri == row.item.uri());
++        (current, current && app.believed_playing())
++    };
+     let hovered = ui.is_enabled() && (ui.rect_contains_pointer(rect) || response.has_focus());
+     if row.picked {
+         // Keep the existing translucent selection, using a neutral palette
+@@ -1940,11 +1985,7 @@ fn track_row_contents(
      let mut pick = None;
      let accessible_click = response.clicked() && response.interact_pointer_pos().is_none();
      if ui.is_enabled() && (response.double_clicked() || accessible_click) && !unavailable {
@@ -424,7 +455,7 @@ index a742097..15b6a02 100644
      } else if ui.is_enabled() && response.clicked() {
          // The cell that holds the play control: the number column when
          // there is one, the cover when there is not.
-@@ -1965,11 +1992,7 @@ fn track_row_contents(
+@@ -1965,11 +2006,7 @@ fn track_row_contents(
              if is_current {
                  app.actions.push(Action::TogglePlay);
              } else {
