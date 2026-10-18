@@ -109,6 +109,31 @@ impl App {
         });
     }
 
+    /// Removes local files from a playlist. The Web API refuses their URIs,
+    /// so they go through the same playlist service Spotify's apps use; the
+    /// rows leave the page at once.
+    pub(crate) fn remove_local_from_playlist(&mut self, playlist_id: String, uris: Vec<String>) {
+        if uris.is_empty() {
+            return;
+        }
+        if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
+            let before = page.items.items.len();
+            page.items.retain(|item| {
+                item.playable()
+                    .is_none_or(|playable| !uris.iter().any(|uri| uri == playable.uri()))
+            });
+            let removed = (before - page.items.items.len()) as u32;
+            page.items.total = page.items.total.map(|total| total.saturating_sub(removed));
+            page.items.next_offset = page
+                .items
+                .next_offset
+                .map(|offset| offset.saturating_sub(removed));
+        }
+        self.extras
+            .requests
+            .push(Request::RemoveFromPlaylist { playlist_id, uris });
+    }
+
     pub(crate) fn apply_extra(&mut self, response: Response) {
         match response {
             Response::ArtistStats { artist_id, result } => {
@@ -148,6 +173,18 @@ impl App {
                 }
                 Err(error) => self.toast_error(format!("Couldn't add to {name}: {error}")),
             },
+            Response::RemovedFromPlaylist {
+                playlist_id,
+                result,
+            } => {
+                match result {
+                    Ok(()) => self.toast("Removed from playlist"),
+                    Err(error) => self.toast_error(format!("Couldn't remove it: {error}")),
+                }
+                // Either way, show the playlist as Spotify has it now.
+                self.actions
+                    .push(Action::Reload(Page::Playlist(playlist_id)));
+            }
         }
     }
 }

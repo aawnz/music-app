@@ -666,6 +666,8 @@ impl App {
                     .retain(|track| !std::path::Path::new(&track.path).starts_with(prefix));
                 self.local_files.tracks_revision += 1;
                 self.save_local_files();
+                // A scan still running holds the removed folder's songs.
+                self.local_files.scan = None;
                 if !self.local_files.folders.is_empty() {
                     self.rescan_local_files(ctx);
                 }
@@ -868,6 +870,26 @@ impl App {
         action: Action,
         ctx: &egui::Context,
     ) -> Option<Action> {
+        // Local files leave a playlist through the playlist service; the
+        // rest of the rows go the usual way.
+        let action = match action {
+            Action::RemoveFromPlaylist { playlist_id, uris }
+                if uris.iter().any(|uri| uri.starts_with("spotify:local:")) =>
+            {
+                let (local, spotify): (Vec<String>, Vec<String>) = uris
+                    .into_iter()
+                    .partition(|uri| uri.starts_with("spotify:local:"));
+                self.remove_local_from_playlist(playlist_id.clone(), local);
+                if spotify.is_empty() {
+                    return None;
+                }
+                Action::RemoveFromPlaylist {
+                    playlist_id,
+                    uris: spotify,
+                }
+            }
+            action => action,
+        };
         if !self.local_files.active {
             return Some(action);
         }

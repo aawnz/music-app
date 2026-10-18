@@ -42,6 +42,12 @@ pub enum Request {
         name: String,
         uris: Vec<String>,
     },
+    /// Removes every row holding one of `uris` (`spotify:local:` URIs,
+    /// which the Web API cannot remove).
+    RemoveFromPlaylist {
+        playlist_id: String,
+        uris: Vec<String>,
+    },
 }
 
 /// What Spotify answered.
@@ -59,6 +65,10 @@ pub enum Response {
         playlist_id: String,
         name: String,
         count: usize,
+        result: Result<(), String>,
+    },
+    RemovedFromPlaylist {
+        playlist_id: String,
         result: Result<(), String>,
     },
 }
@@ -84,6 +94,10 @@ impl Request {
                 playlist_id,
                 name,
                 count: uris.len(),
+                result: Err(message),
+            },
+            Request::RemoveFromPlaylist { playlist_id, .. } => Response::RemovedFromPlaylist {
+                playlist_id,
                 result: Err(message),
             },
         }
@@ -147,6 +161,10 @@ pub async fn run(
                 count: uris.len(),
                 playlist_id,
                 name,
+            },
+            Request::RemoveFromPlaylist { playlist_id, uris } => Response::RemovedFromPlaylist {
+                result: remove_from_playlist(session, http, &playlist_id, &uris).await,
+                playlist_id,
             },
         }
     };
@@ -286,25 +304,13 @@ async fn add_to_playlist(
     playlist_id: &str,
     uris: &[String],
 ) -> Result<(), String> {
-    use librespot_protocol::playlist4_external::{
-        Add, ChangeInfo, Delta, Item, ItemAttributes, ListChanges, Op, SelectedListContent, op,
-    };
+    use librespot_protocol::playlist4_external::{Add, Item, ItemAttributes, Op, op};
 
     if uris.is_empty() {
         return Ok(());
     }
-    let http = http.ok_or("Could not connect to Spotify.")?;
     let id = SpotifyId::from_base62(playlist_id).map_err(|_| "Unknown playlist.".to_string())?;
-    let header = session
-        .spclient()
-        .get_playlist_range(&id, 0, 0)
-        .await
-        .map_err(|error| format!("Could not read the playlist ({error})."))?;
-    let revision = SelectedListContent::parse_from_bytes(&header)
-        .map_err(|_| "Spotify sent a playlist this app cannot read.".to_string())?
-        .revision
-        .unwrap_or_default();
-
+    let (revision, _) = playlist_revision(session, &id).await?;
     let username = session.username();
     let now = jiff::Timestamp::now().as_millisecond();
     let items = uris
@@ -325,11 +331,126 @@ async fn add_to_playlist(
     let mut operation = Op::new();
     operation.kind = Some(EnumOrUnknown::new(op::Kind::ADD));
     operation.add = MessageField::some(add);
+    post_changes(session, http, &id, revision, vec![operation]).await
+}
+
+/// Removes rows the way Spotify's desktop app does: each row by its
+/// position, with its URI so the server can check it is the right one,
+/// from the last row up so earlier positions stay put.
+async fn remove_from_playlist(
+    session: &Session,
+    http: Option<reqwest::Client>,
+    playlist_id: &str,
+    uris: &[String],
+) -> Result<(), String> {
+    use librespot_protocol::playlist4_external::{Item, Op, Rem, SelectedListContent, op};
+
+    if uris.is_empty() {
+        return Ok(());
+    }
+    let id = SpotifyId::from_base62(playlist_id).map_err(|_| "Unknown playlist.".to_string())?;
+    let (revision, length) = playlist_revision(session, &id).await?;
+    let wanted: Vec<_> = uris.iter().map(|uri| same_local_key(uri)).collect();
+    let mut rows = Vec::new();
+    let mut from = 0;
+    while from < length {
+        let count = (length - from).min(PLAYLIST_READ_PAGE);
+        let page = session
+            .spclient()
+            .get_playlist_range(&id, from, count)
+            .await
+            .map_err(|error| format!("Could not read the playlist ({error})."))?;
+        let page = SelectedListContent::parse_from_bytes(&page)
+            .map_err(|_| "Spotify sent a playlist this app cannot read.".to_string())?;
+        let items = page
+            .contents
+            .as_ref()
+            .map(|contents| contents.items.clone())
+            .unwrap_or_default();
+        if items.is_empty() {
+            break;
+        }
+        for (offset, item) in items.iter().enumerate() {
+            let uri = item.uri();
+            if wanted.contains(&same_local_key(uri)) {
+                rows.push((from + offset, uri.to_string()));
+            }
+        }
+        from += items.len();
+    }
+    if rows.is_empty() {
+        return Err("Spotify no longer has that song in this playlist.".into());
+    }
+    let operations = rows
+        .into_iter()
+        .rev()
+        .map(|(index, uri)| {
+            let mut item = Item::new();
+            item.uri = Some(uri);
+            let mut rem = Rem::new();
+            rem.from_index = Some(index as i32);
+            rem.length = Some(1);
+            rem.items.push(item);
+            let mut operation = Op::new();
+            operation.kind = Some(EnumOrUnknown::new(op::Kind::REM));
+            operation.rem = MessageField::some(rem);
+            operation
+        })
+        .collect();
+    post_changes(session, http, &id, revision, operations).await
+}
+
+/// A playlist's current revision and length.
+async fn playlist_revision(session: &Session, id: &SpotifyId) -> Result<(Vec<u8>, usize), String> {
+    use librespot_protocol::playlist4_external::SelectedListContent;
+
+    let header = session
+        .spclient()
+        .get_playlist_range(id, 0, 0)
+        .await
+        .map_err(|error| format!("Could not read the playlist ({error})."))?;
+    let header = SelectedListContent::parse_from_bytes(&header)
+        .map_err(|_| "Spotify sent a playlist this app cannot read.".to_string())?;
+    Ok((
+        header.revision.clone().unwrap_or_default(),
+        usize::try_from(header.length.unwrap_or(0)).unwrap_or(0),
+    ))
+}
+
+/// Rows read per request while looking for the ones to remove.
+const PLAYLIST_READ_PAGE: usize = 100;
+
+/// A local URI compared by what it names, whatever its encoding; other
+/// URIs as they are.
+fn same_local_key(uri: &str) -> String {
+    match parse_local_uri(uri) {
+        Some((artist, album, title, seconds)) => format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{seconds}",
+            artist.to_lowercase(),
+            album.to_lowercase(),
+            title.to_lowercase()
+        ),
+        None => uri.to_string(),
+    }
+}
+
+/// Sends one change to a playlist, based on `revision`. The write is sent
+/// once, without retries, so a lost answer cannot apply it twice.
+async fn post_changes(
+    session: &Session,
+    http: Option<reqwest::Client>,
+    id: &SpotifyId,
+    revision: Vec<u8>,
+    operations: Vec<librespot_protocol::playlist4_external::Op>,
+) -> Result<(), String> {
+    use librespot_protocol::playlist4_external::{ChangeInfo, Delta, ListChanges};
+
+    let http = http.ok_or("Could not connect to Spotify.")?;
     let mut info = ChangeInfo::new();
-    info.user = Some(username);
-    info.timestamp = Some(now);
+    info.user = Some(session.username());
+    info.timestamp = Some(jiff::Timestamp::now().as_millisecond());
     let mut delta = Delta::new();
-    delta.ops.push(operation);
+    delta.ops = operations;
     delta.info = MessageField::some(info);
     let mut changes = ListChanges::new();
     changes.base_revision = Some(revision);
@@ -430,6 +551,18 @@ mod tests {
         assert_eq!(
             parse_local_uri("spotify:local:::Untitled:0"),
             Some((String::new(), String::new(), "Untitled".into(), 0))
+        );
+    }
+
+    #[test]
+    fn local_rows_match_whatever_their_encoding() {
+        assert_eq!(
+            same_local_key("spotify:local:babyesko:Black+Mass:Nuero:129"),
+            same_local_key("spotify:local:Babyesko:Black%20Mass:Nuero:129")
+        );
+        assert_ne!(
+            same_local_key("spotify:local:babyesko:Black+Mass:Nuero:129"),
+            same_local_key("spotify:local:babyesko:Black+Mass:Nuero:130")
         );
     }
 
