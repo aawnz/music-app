@@ -561,6 +561,41 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
                         index,
                     });
                 }
+                // Real Spotify playlists hold local files the same way the
+                // official app adds them, so they show up there too.
+                let playlists = app.editable_playlists();
+                widgets::menu_submenu_with_field(
+                    ui,
+                    &palette,
+                    Some(Icon::ListPlus),
+                    "Add to playlist",
+                    |ui| {
+                        ui.set_min_width(200.0);
+                        if playlists.is_empty() {
+                            widgets::menu_item_enabled(
+                                ui,
+                                &palette,
+                                None,
+                                "No playlists you can edit",
+                                false,
+                            );
+                        }
+                        egui::ScrollArea::vertical()
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                for (id, name) in &playlists {
+                                    if widgets::menu_item(ui, &palette, Some(Icon::ListMusic), name)
+                                    {
+                                        chosen = Some(LocalAction::AddToPlaylist {
+                                            playlist_id: id.clone(),
+                                            name: name.clone(),
+                                            tracks: vec![track.clone()],
+                                        });
+                                    }
+                                }
+                            });
+                    },
+                );
                 if let Some(folder) = &folder
                     && widgets::menu_item(ui, &palette, Some(Icon::ExternalLink), "Show in folder")
                 {

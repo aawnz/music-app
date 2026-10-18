@@ -61,6 +61,18 @@ pub enum LocalAction {
     Close,
     /// Opens a folder in the system's file manager.
     OpenFolder(String),
+    /// Appends songs to one of the account's Spotify playlists.
+    AddToPlaylist {
+        playlist_id: String,
+        name: String,
+        tracks: Vec<LocalTrack>,
+    },
+    /// Plays the files behind a Spotify playlist's local rows: `uris` in
+    /// order, starting at `start`.
+    PlayUris {
+        uris: Vec<String>,
+        start: String,
+    },
 }
 
 #[derive(Default)]
@@ -98,6 +110,10 @@ pub struct LocalFiles {
     spotify_was_playing: bool,
     /// Pushed by the views, applied after the frame.
     pub actions: Vec<LocalAction>,
+    /// Counts changes to `tracks`, so the index below knows to rebuild.
+    tracks_revision: u64,
+    /// Songs by lowercased title, for finding a playlist's local rows.
+    index: std::cell::RefCell<Option<(u64, HashMap<String, Vec<usize>>)>>,
 }
 
 impl LocalFiles {
@@ -153,6 +169,50 @@ impl LocalFiles {
     }
 
     /// The songs the page lists, filtered and sorted.
+    /// The song in the library a `spotify:local:` URI describes: the same
+    /// title, the same artist when the URI names one, and a length within
+    /// three seconds when it gives one.
+    pub fn find_uri(&self, uri: &str) -> Option<LocalTrack> {
+        let (artist, album, title, seconds) = crate::extras::parse_local_uri(uri)?;
+        let title = title.trim().to_lowercase();
+        if title.is_empty() {
+            return None;
+        }
+        let mut index = self.index.borrow_mut();
+        if index
+            .as_ref()
+            .is_none_or(|(revision, _)| *revision != self.tracks_revision)
+        {
+            let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+            for (position, track) in self.tracks.iter().enumerate() {
+                map.entry(track.title.trim().to_lowercase())
+                    .or_default()
+                    .push(position);
+            }
+            *index = Some((self.tracks_revision, map));
+        }
+        let (_, map) = index.as_ref()?;
+        let artist = artist.trim().to_lowercase();
+        let album = album.trim().to_lowercase();
+        let candidates = map.get(&title)?;
+        let fits = |track: &LocalTrack| {
+            (artist.is_empty() || track.artist.trim().to_lowercase() == artist)
+                && (seconds == 0
+                    || track.duration_ms == 0
+                    || (i64::from(track.duration_ms / 1000) - i64::from(seconds)).abs() <= 3)
+        };
+        let fitting: Vec<&LocalTrack> = candidates
+            .iter()
+            .map(|&position| &self.tracks[position])
+            .filter(|track| fits(track))
+            .collect();
+        fitting
+            .iter()
+            .find(|track| track.album.trim().to_lowercase() == album)
+            .or_else(|| fitting.first())
+            .map(|track| (*track).clone())
+    }
+
     pub fn visible_rows(&self) -> Vec<LocalTrack> {
         let needle = self.filter.trim().to_lowercase();
         let mut rows: Vec<LocalTrack> = self
@@ -206,6 +266,7 @@ impl App {
         files.loaded = true;
         files.folders = library.folders;
         files.tracks = library.tracks;
+        files.tracks_revision += 1;
         files.volume = library.volume.clamp(0.0, 1.0);
         files.shuffle = library.shuffle;
         files.repeat = library.repeat;
@@ -290,12 +351,10 @@ impl App {
     /// Runs once a frame, after the frame's actions: applies what the
     /// views asked for and reads back what the player and scan did.
     pub(crate) fn local_files_frame(&mut self, ctx: &egui::Context) {
-        let wanted = !self.local_files.actions.is_empty()
-            || matches!(self.page(), Page::LocalFiles)
-            || self.local_files.active;
-        if wanted {
-            self.ensure_local_files_loaded(ctx);
-        }
+        // Read from the start: a Spotify playlist's local rows play from
+        // the library, wherever they are opened.
+        self.ensure_local_files_loaded(ctx);
+        self.extras_frame();
         let actions = std::mem::take(&mut self.local_files.actions);
         for action in actions {
             self.apply_local_action(action, ctx);
@@ -307,6 +366,7 @@ impl App {
             self.local_files.scan = None;
             if tracks != self.local_files.tracks {
                 self.local_files.tracks = tracks;
+                self.local_files.tracks_revision += 1;
                 self.save_local_files();
             }
         }
@@ -451,6 +511,7 @@ impl App {
                 self.local_files
                     .tracks
                     .retain(|track| !std::path::Path::new(&track.path).starts_with(prefix));
+                self.local_files.tracks_revision += 1;
                 self.save_local_files();
                 if !self.local_files.folders.is_empty() {
                     self.rescan_local_files(ctx);
@@ -510,6 +571,66 @@ impl App {
                     self.toast_error(format!("Couldn't open the folder: {error}"));
                 }
             }
+            LocalAction::AddToPlaylist {
+                playlist_id,
+                name,
+                tracks,
+            } => {
+                let uris = tracks
+                    .iter()
+                    .map(|track| {
+                        crate::extras::local_uri(
+                            &track.artist,
+                            &track.album,
+                            &track.title,
+                            track.duration_ms,
+                        )
+                    })
+                    .collect();
+                self.add_local_to_playlist(playlist_id, name, uris);
+            }
+            LocalAction::PlayUris { uris, start } => {
+                let mut rows = Vec::new();
+                let mut index = None;
+                for uri in &uris {
+                    if let Some(track) = self.local_files.find_uri(uri) {
+                        if *uri == start && index.is_none() {
+                            index = Some(rows.len());
+                        }
+                        rows.push(track);
+                    }
+                }
+                match index {
+                    Some(index) => self.play_local_rows(rows, index, ctx),
+                    None => self.toast(
+                        "This song isn't in your Local Files folders. Add its folder in Local Files.",
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The `spotify:local:` URIs among a list's rows, in order: what plays
+    /// from the library when one of them is double-clicked.
+    pub(crate) fn local_uris_in(&self, context: &RowContext) -> Vec<String> {
+        let local = |uri: &String| uri.starts_with("spotify:local:");
+        match context {
+            RowContext::Uris(uris) | RowContext::View { uris, .. } => {
+                uris.iter().filter(|uri| local(uri)).cloned().collect()
+            }
+            RowContext::Context { uri, .. } => uri
+                .strip_prefix("spotify:playlist:")
+                .and_then(|id| self.playlist_pages.get(id))
+                .map(|page| {
+                    page.items
+                        .items
+                        .iter()
+                        .filter_map(|row| row.playable().map(|item| item.uri().to_string()))
+                        .filter(|uri| local(uri))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            RowContext::Queue => Vec::new(),
         }
     }
 

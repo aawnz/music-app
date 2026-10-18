@@ -1,9 +1,20 @@
 # Spotifast with Local Files
 
 [Spotifast](https://github.com/crmne/spotifast) (a fast, native Spotify
-client) with one addition: a **Local Files** page, like Spotify's own. Add
-folders from your computer and play their MP3, FLAC, M4A, OGG and WAV files
-in Spotifast, with the regular player bar, shuffle, repeat and covers.
+client) with a few additions:
+
+- A **Local Files** page, like Spotify's own. Add folders from your computer
+  and play their MP3, FLAC, M4A, OGG and WAV files, with the regular player
+  bar, shuffle, repeat and covers.
+- **Local files in your playlists.** Right-click a song in Local Files and
+  choose **Add to playlist**. It goes into your real Spotify playlist, the
+  same way Spotify's own app adds local files, and plays from this computer.
+- **Monthly listeners** on artist pages.
+- **Song credits.** Right-click a song and choose **Show credits**.
+
+The last three use the same private Spotify requests as Spotify's own apps,
+so they need playback turned on in Settings and may stop working if Spotify
+changes them.
 
 This is an unofficial build. It is not made or supported by Spotifast's
 author, so please don't send him reports about it.

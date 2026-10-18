@@ -15,27 +15,38 @@ index fd708c1..0707433 100644
  # update checks. HTTP proxies work without it. `system-proxy` reads the OS
  # proxy on macOS and Windows when the mode is System; Linux uses environment
 diff --git a/src/app.rs b/src/app.rs
-index ceea55b..24361d5 100644
+index ceea55b..3aac7e0 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -669,6 +669,8 @@ pub struct App {
+@@ -669,6 +669,10 @@ pub struct App {
      /// The window's pixels per point when it last drew, so artwork chosen
      /// away from the drawing code fits the display it lands on.
      pub pixels_per_point: f32,
 +    /// Songs from folders on this computer, and their own player.
 +    pub local_files: local_files::LocalFiles,
++    /// Monthly listeners, song credits and adding to playlists.
++    pub extras: extras::Extras,
  }
  
  /// How many plays the Home shelf asks for: it shows sixteen cards.
-@@ -1106,6 +1108,7 @@ impl App {
+@@ -1106,6 +1110,8 @@ impl App {
              winamp: crate::winamp::WinampState::new(session.winamp_pos, tap, eq),
              player_bar_analyser: crate::vis::WideAnalyser::default(),
              pixels_per_point: 1.0,
 +            local_files: local_files::LocalFiles::default(),
++            extras: extras::Extras::default(),
          };
          app.local.volume = app.settings.volume;
          // What was played here is on disk and needs nothing from the
-@@ -2498,6 +2501,7 @@ impl App {
+@@ -2177,6 +2183,7 @@ impl App {
+                     generation,
+                     result,
+                 } => self.receive_radio(&seed, generation, result),
++                Event::Extra(response) => self.apply_extra(response),
+                 Event::Prerelease {
+                     uri,
+                     generation,
+@@ -2498,6 +2505,7 @@ impl App {
                  }
              }
              Page::Settings => {}
@@ -43,7 +54,7 @@ index ceea55b..24361d5 100644
          }
      }
  
-@@ -4547,6 +4551,7 @@ impl App {
+@@ -4547,6 +4555,7 @@ impl App {
                  }
              }
              Page::Settings => {}
@@ -51,7 +62,7 @@ index ceea55b..24361d5 100644
          }
      }
  
-@@ -9462,6 +9467,11 @@ impl App {
+@@ -9462,6 +9471,11 @@ impl App {
      /// Apply one queued UI action after drawing, updating optimistic local state
      /// and scheduling any backend work or preference persistence it requires.
      pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
@@ -63,7 +74,7 @@ index ceea55b..24361d5 100644
          if matches!(
              &action,
              Action::Open(_)
-@@ -10998,6 +11008,7 @@ impl App {
+@@ -10998,6 +11012,7 @@ impl App {
          #[cfg(feature = "milkdrop")]
          self.sync_milkdrop(ctx);
          self.apply_actions(ctx);
@@ -71,7 +82,7 @@ index ceea55b..24361d5 100644
          self.sync_media_controls(ctx);
          self.sync_window_title(ctx);
          self.remember_geometry(ctx);
-@@ -11329,6 +11340,7 @@ impl App {
+@@ -11329,6 +11344,7 @@ impl App {
              crate::ui::show(self, ui);
          }
          self.apply_actions(ctx);
@@ -79,19 +90,106 @@ index ceea55b..24361d5 100644
          let autoscroll = self.autoscroll.finish(
              ctx,
              crate::autoscroll::enabled(self.settings.middle_click_autoscroll),
-@@ -11975,6 +11987,7 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
+@@ -11975,6 +11991,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
      }
  }
  
++pub mod extras;
 +pub mod local_files;
  mod radio;
  
  #[cfg(test)]
+diff --git a/src/backend.rs b/src/backend.rs
+index 3948e40..2966ffd 100644
+--- a/src/backend.rs
++++ b/src/backend.rs
+@@ -797,6 +797,14 @@ pub enum Command {
+         generation: u64,
+         result: Result<Box<crate::prerelease::Prerelease>, String>,
+     },
++    /// Monthly listeners, credits, or adding local files to a playlist:
++    /// requests Spotify's own apps make (see `crate::extras`).
++    Extra(crate::extras::Request),
++    /// Internal: an extra request finished for the session it started in.
++    ExtraResolved {
++        session_generation: u64,
++        response: crate::extras::Response,
++    },
+     /// Internal: a radio finished resolving for the session it started in.
+     RadioResolved {
+         session_generation: u64,
+@@ -936,6 +944,8 @@ pub enum Event {
+         generation: u64,
+         result: Result<(), String>,
+     },
++    /// The answer to an extra request (see `crate::extras`).
++    Extra(crate::extras::Response),
+     /// Whether Spotify's internal metadata positively identifies an album as an EP.
+     AlbumType {
+         uri: String,
+@@ -2441,6 +2451,15 @@ impl Worker {
+                         });
+                     }
+                 }
++                Command::Extra(request) => self.start_extra(request),
++                Command::ExtraResolved {
++                    session_generation,
++                    response,
++                } => {
++                    if self.signed_in && session_generation == *self.session.borrow() {
++                        self.emit(Event::Extra(response));
++                    }
++                }
+                 Command::Radio { seed, generation } => {
+                     self.radio_waiting.insert(seed, generation);
+                     self.start_radio();
+@@ -3905,6 +3924,33 @@ impl Worker {
+         });
+     }
+ 
++    /// Runs an extra request on the playback session, which these requests
++    /// need: without local playback they are answered with a reason.
++    fn start_extra(&mut self, request: crate::extras::Request) {
++        let Some(engine) = self.engine.clone() else {
++            self.emit(Event::Extra(request.failed(
++                "This needs playback on this computer. Turn it on in Settings.",
++            )));
++            return;
++        };
++        let session_generation = *self.session.borrow();
++        let mut cancelled = self.session.subscribe();
++        let commands = self.commands.clone();
++        let web = self.api.prerelease_http_client();
++        let http = crate::http::build_collection_client(&self.engine_config.proxy).ok();
++        tokio::spawn(async move {
++            let response = tokio::select! {
++                biased;
++                _ = cancelled.changed() => return,
++                response = crate::extras::run(engine.session(), web, http, request) => response,
++            };
++            let _ = commands.send(Command::ExtraResolved {
++                session_generation,
++                response,
++            });
++        });
++    }
++
+     fn fail_waiting_prerelease(&mut self, message: &str) {
+         if let Some((uri, generation)) = self.prerelease_waiting.take() {
+             self.emit(Event::Prerelease {
 diff --git a/src/lib.rs b/src/lib.rs
-index 22c93c2..04ad6c1 100644
+index 22c93c2..0340296 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -22,6 +22,7 @@ pub mod images;
+@@ -15,6 +15,7 @@ pub mod credentials;
+ pub mod demo;
+ pub mod emoji;
+ pub mod eq;
++pub mod extras;
+ pub mod history;
+ pub mod http;
+ pub mod i18n;
+@@ -22,6 +23,7 @@ pub mod images;
  pub mod liked;
  pub mod limiter;
  pub mod link;
@@ -128,11 +226,32 @@ index 1309d13..e54e949 100644
              other => {
                  let (kind, id) = other.split_once(':')?;
                  match kind {
+diff --git a/src/ui/artist.rs b/src/ui/artist.rs
+index b581448..3e7598c 100644
+--- a/src/ui/artist.rs
++++ b/src/ui/artist.rs
+@@ -317,6 +317,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
+ fn artist_hero(app: &mut App, ui: &mut egui::Ui, artist: &Artist, preview: Option<&Artist>) {
+     let locale = app.locale;
+     let mut byline = Vec::new();
++    if let Some(listeners) = app.extras.monthly_listeners(&artist.id) {
++        byline.push((
++            format!("{} monthly listeners", util::format_count(listeners)),
++            None,
++        ));
++    }
+     if let Some(followers) = &artist.followers {
+         byline.push((
+             ngettext(
 diff --git a/src/ui/mod.rs b/src/ui/mod.rs
-index f31a4d4..5e8264f 100644
+index f31a4d4..e4e9d4f 100644
 --- a/src/ui/mod.rs
 +++ b/src/ui/mod.rs
-@@ -9,6 +9,7 @@ mod dialogs;
+@@ -6,9 +6,11 @@ pub mod artist;
+ pub mod collection;
+ pub(crate) mod devices;
+ mod dialogs;
++mod extras;
  pub mod home;
  mod keys;
  pub mod library;
@@ -140,7 +259,7 @@ index f31a4d4..5e8264f 100644
  pub mod login;
  mod lyrics;
  pub mod player_bar;
-@@ -63,7 +64,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -63,7 +65,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
              ),
          );
      }
@@ -153,7 +272,15 @@ index f31a4d4..5e8264f 100644
      if app.lyrics_fullscreen.is_some() {
          lyrics::fullscreen(app, ui);
      } else {
-@@ -266,7 +271,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -81,6 +87,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+     }
+     devices::popup(app, ctx);
+     dialogs::show(app, ctx);
++    extras::show(app, ctx);
+     update::show(app, ctx);
+     widgets::drag_ghost(ctx, &app.palette, app.locale);
+     toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
+@@ -266,7 +273,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
              let page = app.page().clone();
              let overview = matches!(
                  page,
@@ -162,7 +289,7 @@ index f31a4d4..5e8264f 100644
              );
              // The wash belongs to the page's hero, so it scrolls away with
              // it. The page's offset is known once it has been laid out, so
-@@ -316,6 +321,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -316,6 +323,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                                  Page::Radio(seed) => radio::radio(app, ui, &seed),
                                  Page::Queue => queue::page(app, ui),
                                  Page::Settings => settings::show(app, ui),
@@ -192,3 +319,95 @@ index 82b4ba9..d364fdd 100644
      ui.add_space(10.0);
      ui.painter().hline(
          ui.max_rect().x_range().shrink(4.0),
+diff --git a/src/ui/widgets.rs b/src/ui/widgets.rs
+index a742097..cc049b9 100644
+--- a/src/ui/widgets.rs
++++ b/src/ui/widgets.rs
+@@ -526,7 +526,7 @@ pub fn menu_submenu<R>(
+ /// A submenu that holds a field to type in. A click inside it focuses the
+ /// field or scrolls its list instead of closing the menu; its entries still
+ /// close the menu when chosen.
+-fn menu_submenu_with_field<R>(
++pub(crate) fn menu_submenu_with_field<R>(
+     ui: &mut Ui,
+     palette: &Palette,
+     icon: Option<Icon>,
+@@ -977,6 +977,13 @@ pub fn item_menu(
+             app.actions.push(Action::ToggleSaved(uri.clone()));
+         }
+         add_to_playlist_menu(ui, app, std::slice::from_ref(item));
++        if let PlayableItem::Track(track) = item
++            && let Some(id) = uri.strip_prefix("spotify:track:")
++            && menu_item(ui, &palette, Some(Icon::Info), "Show credits")
++        {
++            app.extras
++                .open_credits(id, &track.name, &track.artist_names());
++        }
+     } else if menu_item(
+         ui,
+         &palette,
+@@ -1249,6 +1256,25 @@ pub(crate) fn row_playable(item: &PlayableItem) -> bool {
+             if track.is_local || track.is_playable == Some(false))
+ }
+ 
++/// Plays a track row: through Spotify, or from this computer for a local file.
++fn play_row(app: &mut App, row: &TrackRow<'_>, local: bool) {
++    if local {
++        let uris = app.local_uris_in(row.context);
++        app.local_files
++            .actions
++            .push(crate::app::local_files::LocalAction::PlayUris {
++                uris,
++                start: row.item.uri().to_string(),
++            });
++    } else {
++        app.actions.push(Action::PlayFromRow {
++            context: row.context.clone(),
++            uri: row.item.uri().to_string(),
++            index: row.index as u32,
++        });
++    }
++}
++
+ /// Describes one row of a track table.
+ pub struct TrackRow<'a> {
+     pub index: usize,
+@@ -1404,7 +1430,11 @@ fn track_row_contents(
+     let width = ui.available_width();
+     let (rect, response) = ui.allocate_exact_size(vec2(width, row_height), Sense::click_and_drag());
+     let rect = rect.translate(vec2(0.0, row.shift));
+-    let unavailable = !row_playable(row.item);
++    // A playlist's local file plays from this computer when Local Files
++    // has found it.
++    let local = row.item.uri().starts_with("spotify:local:")
++        && app.local_files.find_uri(row.item.uri()).is_some();
++    let unavailable = !row_playable(row.item) && !local;
+     response.widget_info(|| {
+         egui::WidgetInfo::selected(
+             egui::WidgetType::Button,
+@@ -1940,11 +1970,7 @@ fn track_row_contents(
+     let mut pick = None;
+     let accessible_click = response.clicked() && response.interact_pointer_pos().is_none();
+     if ui.is_enabled() && (response.double_clicked() || accessible_click) && !unavailable {
+-        app.actions.push(Action::PlayFromRow {
+-            context: row.context.clone(),
+-            uri: row.item.uri().to_string(),
+-            index: row.index as u32,
+-        });
++        play_row(app, &row, local);
+     } else if ui.is_enabled() && response.clicked() {
+         // The cell that holds the play control: the number column when
+         // there is one, the cover when there is not.
+@@ -1965,11 +1991,7 @@ fn track_row_contents(
+             if is_current {
+                 app.actions.push(Action::TogglePlay);
+             } else {
+-                app.actions.push(Action::PlayFromRow {
+-                    context: row.context.clone(),
+-                    uri: row.item.uri().to_string(),
+-                    index: row.index as u32,
+-                });
++                play_row(app, &row, local);
+             }
+         } else if !on_control {
+             // The body of the row, which plays nothing on a single click.
