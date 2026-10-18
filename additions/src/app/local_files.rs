@@ -21,6 +21,8 @@ const OPTIMISTIC_HOLD: Duration = Duration::from_millis(1500);
 /// Spotify starting to play within this long of a local song starting is
 /// the pause we sent catching up, not the listener switching back.
 const SWITCH_GRACE: Duration = Duration::from_secs(5);
+/// How long to wait for more local songs Spotify skips in a row.
+const HANDOFF_GATHER: Duration = Duration::from_millis(800);
 
 /// Columns the song list sorts by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -114,6 +116,12 @@ pub struct LocalFiles {
     pub cover: Option<(u64, egui::TextureHandle)>,
     error_serial: u64,
     spotify_was_playing: bool,
+    /// Local songs Spotify skipped in a playlist, gathered for a moment
+    /// before they play here, and when the last skip came.
+    handoff: Vec<LocalTrack>,
+    handoff_at: Option<Instant>,
+    /// Spotify continues when the handed-over songs end.
+    resume_spotify: bool,
     /// Pushed by the views, applied after the frame.
     pub actions: Vec<LocalAction>,
     /// Counts changes to `tracks`, so the index below knows to rebuild.
@@ -377,6 +385,7 @@ impl App {
             }
         }
         self.poll_local_player(ctx);
+        self.local_handoff_frame(ctx);
         // Spotify starting on its own (from a phone, the tray or Connect)
         // takes the bar back.
         let spotify_playing = self.spotify_playing();
@@ -394,6 +403,55 @@ impl App {
         self.local_files.spotify_was_playing = spotify_playing;
         if self.local_files.active && self.local_files.shown_playing() {
             theme::repaint_after(ctx, Duration::from_millis(250));
+        }
+    }
+
+    /// Spotify reached a playlist's local file, which it cannot play: it
+    /// skips it, and the song plays here instead when Local Files has it.
+    /// Skips that come together (several local songs in a row) play as one
+    /// run, then Spotify carries on.
+    pub(crate) fn local_handoff(&mut self, uri: &str) {
+        let Some(track) = self.local_files.find_uri(uri) else {
+            let title = crate::extras::parse_local_uri(uri)
+                .map(|(_, _, title, _)| title)
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| "a local song".into());
+            self.toast(format!(
+                "Skipped {title}: it isn't in your Local Files folders."
+            ));
+            return;
+        };
+        if self.spotify_playing() {
+            self.toggle_play();
+        }
+        self.local_files.handoff.push(track);
+        self.local_files.handoff_at = Some(Instant::now());
+    }
+
+    fn local_handoff_frame(&mut self, ctx: &egui::Context) {
+        if let Some(at) = self.local_files.handoff_at {
+            if at.elapsed() < HANDOFF_GATHER {
+                theme::repaint_after(ctx, HANDOFF_GATHER);
+            } else {
+                self.local_files.handoff_at = None;
+                let rows = std::mem::take(&mut self.local_files.handoff);
+                if self.spotify_playing() {
+                    self.toggle_play();
+                }
+                self.play_local_rows(rows, 0, ctx);
+                self.local_files.resume_spotify = true;
+            }
+        }
+        if self.local_files.resume_spotify
+            && self.local_files.active
+            && self.local_files.expected.is_none()
+            && self.local_files.status.finished
+        {
+            self.local_files.resume_spotify = false;
+            self.deactivate_local_files();
+            if !self.spotify_playing() {
+                self.toggle_play();
+            }
         }
     }
 
@@ -652,6 +710,7 @@ impl App {
         let Some(chosen) = rows.get(index).cloned() else {
             return;
         };
+        self.local_files.resume_spotify = false;
         self.local_files.base = rows.clone();
         let (queue, start) = if self.local_files.shuffle {
             (shuffled_from(&rows, index), 0)

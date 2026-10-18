@@ -773,6 +773,8 @@ pub struct Status {
     pub track_serial: u64,
     /// The last problem, with a serial so each is shown once.
     pub error: Option<(u64, String)>,
+    /// The queue played to its end.
+    pub finished: bool,
 }
 
 /// The playback thread's handle. Dropping it stops the thread.
@@ -929,6 +931,7 @@ impl Engine {
                 self.update(|status| {
                     status.generation = generation;
                     status.queue_len = queue_len;
+                    status.finished = false;
                 });
                 self.start_current();
             }
@@ -979,7 +982,10 @@ impl Engine {
             self.render.playing.store(false, Ordering::Relaxed);
             self.seek(0);
             self.paused_at = Some(Instant::now());
-            self.update(|status| status.playing = false);
+            self.update(|status| {
+                status.playing = false;
+                status.finished = true;
+            });
         }
     }
 
@@ -1031,6 +1037,7 @@ impl Engine {
                     status.current = Some(track.clone());
                     status.index = index;
                     status.playing = true;
+                    status.finished = false;
                     status.duration_ms = duration_ms;
                     status.track_serial += 1;
                     serial = status.track_serial;
@@ -1094,7 +1101,10 @@ impl Engine {
         }
         self.render.playing.store(true, Ordering::Relaxed);
         self.paused_at = None;
-        self.update(|status| status.playing = true);
+        self.update(|status| {
+            status.playing = true;
+            status.finished = false;
+        });
     }
 
     fn seek(&mut self, ms: u32) {

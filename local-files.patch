@@ -15,7 +15,7 @@ index fd708c1..0707433 100644
  # update checks. HTTP proxies work without it. `system-proxy` reads the OS
  # proxy on macOS and Windows when the mode is System; Linux uses environment
 diff --git a/src/app.rs b/src/app.rs
-index ceea55b..3aac7e0 100644
+index ceea55b..cfc55a1 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -669,6 +669,10 @@ pub struct App {
@@ -54,7 +54,24 @@ index ceea55b..3aac7e0 100644
          }
      }
  
-@@ -4547,6 +4555,7 @@ impl App {
+@@ -2662,8 +2670,16 @@ impl App {
+         {
+             controls.seeked(Duration::from_millis(u64::from(state.position_ms)));
+         }
++        // A playlist's local file: Spotify skips it, and Local Files plays
++        // it from this computer when it has it.
+         if let Some(error) = &state.error
+             && self.local.error.as_deref() != Some(error.as_str())
++            && let Some(uri) = error.strip_prefix("This item isn't available: ")
++            && uri.starts_with("spotify:local:")
++        {
++            self.local_handoff(uri);
++        } else if let Some(error) = &state.error
++            && self.local.error.as_deref() != Some(error.as_str())
+         {
+             self.toast_error(engine_error_text(self.locale, error));
+             // One unavailable track is Spotify's catalogue; several in a
+@@ -4547,6 +4563,7 @@ impl App {
                  }
              }
              Page::Settings => {}
@@ -62,7 +79,7 @@ index ceea55b..3aac7e0 100644
          }
      }
  
-@@ -9462,6 +9471,11 @@ impl App {
+@@ -9462,6 +9479,11 @@ impl App {
      /// Apply one queued UI action after drawing, updating optimistic local state
      /// and scheduling any backend work or preference persistence it requires.
      pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
@@ -74,7 +91,7 @@ index ceea55b..3aac7e0 100644
          if matches!(
              &action,
              Action::Open(_)
-@@ -10998,6 +11012,7 @@ impl App {
+@@ -10998,6 +11020,7 @@ impl App {
          #[cfg(feature = "milkdrop")]
          self.sync_milkdrop(ctx);
          self.apply_actions(ctx);
@@ -82,7 +99,7 @@ index ceea55b..3aac7e0 100644
          self.sync_media_controls(ctx);
          self.sync_window_title(ctx);
          self.remember_geometry(ctx);
-@@ -11329,6 +11344,7 @@ impl App {
+@@ -11329,6 +11352,7 @@ impl App {
              crate::ui::show(self, ui);
          }
          self.apply_actions(ctx);
@@ -90,7 +107,7 @@ index ceea55b..3aac7e0 100644
          let autoscroll = self.autoscroll.finish(
              ctx,
              crate::autoscroll::enabled(self.settings.middle_click_autoscroll),
-@@ -11975,6 +11991,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
+@@ -11975,6 +11999,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
      }
  }
  
