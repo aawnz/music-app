@@ -1,5 +1,5 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index fd708c1..0707433 100644
+index fd708c1..36c2b43 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -137,7 +137,10 @@ protobuf = "3"
@@ -14,6 +14,17 @@ index fd708c1..0707433 100644
  # `socks` is SOCKS5 proxy support for the Web API, artwork, lyrics, and
  # update checks. HTTP proxies work without it. `system-proxy` reads the OS
  # proxy on macOS and Windows when the mode is System; Linux uses environment
+@@ -171,6 +174,10 @@ rand = "0.9"
+ open = "5"
+ percent-encoding = "2"
+ urlencoding = "2"
++# Spotifast Jam: the WebSocket to the Jam relay (already in the build for
++# librespot's own connection).
++tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
++futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+ jiff = "0.2"
+ mdns-sd = "0.21"
+ unicode-bidi = "0.3"
 diff --git a/src/app.rs b/src/app.rs
 index ceea55b..eed5050 100644
 --- a/src/app.rs
@@ -209,10 +220,10 @@ index 3948e40..2966ffd 100644
          if let Some((uri, generation)) = self.prerelease_waiting.take() {
              self.emit(Event::Prerelease {
 diff --git a/src/lib.rs b/src/lib.rs
-index 22c93c2..0340296 100644
+index 22c93c2..a552b55 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -15,6 +15,7 @@ pub mod credentials;
+@@ -15,13 +15,16 @@ pub mod credentials;
  pub mod demo;
  pub mod emoji;
  pub mod eq;
@@ -220,7 +231,8 @@ index 22c93c2..0340296 100644
  pub mod history;
  pub mod http;
  pub mod i18n;
-@@ -22,6 +23,7 @@ pub mod images;
+ pub mod images;
++pub mod jam;
  pub mod liked;
  pub mod limiter;
  pub mod link;
@@ -275,22 +287,23 @@ index b581448..3e7598c 100644
          byline.push((
              ngettext(
 diff --git a/src/ui/mod.rs b/src/ui/mod.rs
-index f31a4d4..e4e9d4f 100644
+index f31a4d4..1714ac8 100644
 --- a/src/ui/mod.rs
 +++ b/src/ui/mod.rs
-@@ -6,9 +6,11 @@ pub mod artist;
+@@ -6,9 +6,12 @@ pub mod artist;
  pub mod collection;
  pub(crate) mod devices;
  mod dialogs;
 +mod extras;
  pub mod home;
++mod jam;
  mod keys;
  pub mod library;
 +pub mod local_files;
  pub mod login;
  mod lyrics;
  pub mod player_bar;
-@@ -63,7 +65,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -63,7 +66,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
              ),
          );
      }
@@ -303,15 +316,16 @@ index f31a4d4..e4e9d4f 100644
      if app.lyrics_fullscreen.is_some() {
          lyrics::fullscreen(app, ui);
      } else {
-@@ -81,6 +87,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -81,6 +88,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
      }
      devices::popup(app, ctx);
      dialogs::show(app, ctx);
 +    extras::show(app, ctx);
++    jam::show(app, ctx);
      update::show(app, ctx);
      widgets::drag_ghost(ctx, &app.palette, app.locale);
      toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
-@@ -266,7 +273,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -266,7 +275,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
              let page = app.page().clone();
              let overview = matches!(
                  page,
@@ -320,7 +334,7 @@ index f31a4d4..e4e9d4f 100644
              );
              // The wash belongs to the page's hero, so it scrolls away with
              // it. The page's offset is known once it has been laid out, so
-@@ -316,6 +323,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -316,6 +325,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                                  Page::Radio(seed) => radio::radio(app, ui, &seed),
                                  Page::Queue => queue::page(app, ui),
                                  Page::Settings => settings::show(app, ui),
@@ -345,10 +359,10 @@ index b50faf4..a8682dc 100644
      let dim = if enabled {
          palette.secondary
 diff --git a/src/ui/sidebar.rs b/src/ui/sidebar.rs
-index 82b4ba9..d364fdd 100644
+index 82b4ba9..555176a 100644
 --- a/src/ui/sidebar.rs
 +++ b/src/ui/sidebar.rs
-@@ -933,6 +933,17 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
+@@ -933,6 +933,33 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
      {
          app.actions.push(Action::FocusSearch);
      }
@@ -362,6 +376,22 @@ index 82b4ba9..d364fdd 100644
 +    .clicked()
 +    {
 +        app.actions.push(Action::Open(Page::LocalFiles));
++    }
++    // Listening together with friends who use Spotifast.
++    let jam_label = match app.local_files.jam.session.as_ref().filter(|s| s.joined) {
++        Some(session) => format!("Jam · {}", session.members.len()),
++        None => "Jam".to_string(),
++    };
++    if nav_row(
++        ui,
++        &palette,
++        Icon::Users,
++        &jam_label,
++        app.local_files.jam.open || app.local_files.jam.in_jam(),
++    )
++    .clicked()
++    {
++        app.local_files.jam.open = true;
 +    }
      ui.add_space(10.0);
      ui.painter().hline(

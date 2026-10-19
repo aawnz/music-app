@@ -113,6 +113,9 @@ jobs:
         shell: pwsh
         working-directory: src
         run: |
+          # The Jam relay's address, once it is deployed (see relay.yml).
+          $relay = Join-Path $env:GITHUB_WORKSPACE "fork\jam-relay-url.txt"
+          if (Test-Path $relay) { $env:SPOTIFAST_JAM_RELAY = (Get-Content $relay -Raw).Trim() }
           cargo build --release --target $env:TARGET
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::warning::The build with MilkDrop failed; building without it."

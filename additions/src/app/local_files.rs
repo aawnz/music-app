@@ -107,6 +107,7 @@ pub struct RunPlan {
     run: Option<LocalRun>,
 }
 
+pub mod jam;
 mod mixed;
 
 #[derive(Default)]
@@ -152,6 +153,8 @@ pub struct LocalFiles {
     run: Option<LocalRun>,
     /// A playlist with local files, in the order the app keeps.
     mixed: Option<mixed::MixedQueue>,
+    /// Listening together with friends on Spotifast.
+    pub jam: jam::JamState,
     /// Pushed by the views, applied after the frame.
     pub actions: Vec<LocalAction>,
     /// Counts changes to `tracks`, so the index below knows to rebuild.
@@ -418,6 +421,7 @@ impl App {
         self.poll_local_player(ctx);
         self.local_handoff_frame(ctx);
         self.mixed_frame(ctx);
+        self.jam_frame(ctx);
         // Spotify starting on its own (from a phone, the tray or Connect)
         // takes the bar back.
         let spotify_playing = self.spotify_playing();
@@ -746,7 +750,7 @@ impl App {
     }
 
     fn apply_local_action(&mut self, action: LocalAction, ctx: &egui::Context) {
-        if self.mixed_take_local(&action, ctx) {
+        if self.jam_take_local(&action) || self.mixed_take_local(&action, ctx) {
             return;
         }
         match action {
@@ -980,6 +984,7 @@ impl App {
         action: Action,
         ctx: &egui::Context,
     ) -> Option<Action> {
+        let action = self.jam_take(action)?;
         let action = self.mixed_take(action, ctx)?;
         // One repeat for a playlist's whole order, Spotify's, whichever
         // player has the bar.
