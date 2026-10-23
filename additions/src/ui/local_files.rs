@@ -623,6 +623,23 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         )
         .show(ui, |ui| {
             let rect = ui.max_rect();
+            // The same visualizer as for Spotify's songs, behind the bar:
+            // the local player feeds the same sound to it.
+            let behind = rect.expand2(vec2(16.0, 0.0));
+            let sounding = app.local_library.shown_playing();
+            if crate::ui::player_bar::draw_visualizer(app, ui, behind, sounding) {
+                theme::visualiser_frame(ui.ctx(), app.visualiser_fps());
+            }
+            if app.settings.player_bar_vis_click {
+                let empty = ui.interact(
+                    behind,
+                    ui.id().with("local-player-bar-visualizer"),
+                    Sense::click(),
+                );
+                if empty.clicked() {
+                    app.actions.push(crate::model::Action::CyclePlayerBarVis);
+                }
+            }
             ui.painter().hline(
                 rect.x_range(),
                 rect.top() + 0.5,

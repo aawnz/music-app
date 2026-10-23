@@ -336,7 +336,7 @@ impl App {
 
     fn local_player(&mut self, ctx: &egui::Context) -> &Player {
         if self.local_library.player.is_none() {
-            let player = Player::new(ctx.clone());
+            let player = Player::new(ctx.clone(), Some(Arc::clone(&self.winamp.tap)));
             player.set_volume(self.local_library.effective_volume());
             player.send(LocalCommand::SetRepeat(self.local_library.repeat));
             self.local_library.player = Some(player);

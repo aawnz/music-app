@@ -594,6 +594,9 @@ struct RenderShared {
     frames: AtomicU64,
     base_ms: AtomicU64,
     ended: AtomicBool,
+    /// The visualizers' feed: what plays, before the volume, as for
+    /// Spotify's songs.
+    tap: Option<Arc<crate::vis::AudioTap>>,
 }
 
 impl RenderShared {
@@ -619,6 +622,8 @@ struct FileRender {
     format: (u32, u16),
     gain: f32,
     fade: f32,
+    /// Stereo frames for the visualizers, kept to reuse its room.
+    vis: Vec<f64>,
 }
 
 impl fastframe_audio::Render for FileRender {
@@ -669,9 +674,21 @@ impl fastframe_audio::Render for FileRender {
             }
             self.gain += (target - self.gain) * 0.002;
             let gain = self.gain * self.fade;
-            for sample in frame.iter_mut() {
+            let (mut left, mut right) = (0.0f32, 0.0f32);
+            for (channel, sample) in frame.iter_mut().enumerate() {
                 match stream.next() {
-                    Some(value) => *sample = value * gain,
+                    Some(value) => {
+                        *sample = value * gain;
+                        // Before the volume, so it never moves the picture.
+                        match channel {
+                            0 => {
+                                left = value * self.fade;
+                                right = left;
+                            }
+                            1 => right = value * self.fade,
+                            _ => {}
+                        }
+                    }
                     None => {
                         ended = true;
                         *sample = 0.0;
@@ -680,7 +697,17 @@ impl fastframe_audio::Render for FileRender {
             }
             if !ended {
                 frames += 1;
+                if self.shared.tap.is_some() {
+                    self.vis.push(f64::from(left));
+                    self.vis.push(f64::from(right));
+                }
             }
+        }
+        if let Some(tap) = &self.shared.tap
+            && !self.vis.is_empty()
+        {
+            tap.push(&self.vis, 1.0);
+            self.vis.clear();
         }
         self.shared.frames.fetch_add(frames, Ordering::Relaxed);
         if ended {
@@ -731,6 +758,7 @@ fn open_output(
         format: (0, 0),
         gain: 0.0,
         fade: 0.0,
+        vis: Vec::with_capacity(8192),
     };
     let output = fastframe_audio::Output::open(options, render)?;
     log::info!("local files: audio output {}", output.device_name());
@@ -786,7 +814,7 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(ctx: egui::Context) -> Self {
+    pub fn new(ctx: egui::Context, tap: Option<Arc<crate::vis::AudioTap>>) -> Self {
         let (commands, receiver) = mpsc::channel();
         let render = Arc::new(RenderShared {
             stream: Mutex::new(None),
@@ -797,6 +825,7 @@ impl Player {
             frames: AtomicU64::new(0),
             base_ms: AtomicU64::new(0),
             ended: AtomicBool::new(false),
+            tap,
         });
         let status = Arc::new(Mutex::new(Status::default()));
         let cover = Arc::new(Mutex::new(None));

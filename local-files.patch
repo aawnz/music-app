@@ -314,6 +314,28 @@ index 6520493..39659d4 100644
                              }
                          });
                  },
+diff --git a/src/ui/player_bar.rs b/src/ui/player_bar.rs
+index 5403231..defeafc 100644
+--- a/src/ui/player_bar.rs
++++ b/src/ui/player_bar.rs
+@@ -125,10 +125,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+ /// same post-equalizer, pre-volume sound as the mini player's visualizer,
+ /// so the volume never moves it. Returns whether it is still moving.
+ fn visualizer(app: &mut App, ui: &egui::Ui, rect: Rect, now: Option<&NowPlaying>) -> bool {
++    let sounding = now.is_some_and(|now| (now.playing || now.loading) && now.local);
++    draw_visualizer(app, ui, rect, sounding)
++}
++
++/// The visualizer for whatever plays on this computer: `sounding` says
++/// whether something does (a local file's player feeds the same tap).
++pub(crate) fn draw_visualizer(app: &mut App, ui: &egui::Ui, rect: Rect, sounding: bool) -> bool {
+     use crate::settings::PlayerBarVis;
+     use crate::vis;
+     let mode = app.settings.player_bar_vis;
+-    let sounding = now.is_some_and(|now| (now.playing || now.loading) && now.local);
+     let dark = ui.visuals().dark_mode;
+     let colours = vis_colours(app.now_playing_palette(), app.palette.accent, dark);
+     // Over a light bar the same colour paints more strongly, or white
 diff --git a/src/ui/sidebar.rs b/src/ui/sidebar.rs
 index ca1b465..4bc75ef 100644
 --- a/src/ui/sidebar.rs
