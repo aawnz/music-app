@@ -21,7 +21,7 @@ const NUMBER_WIDTH: f32 = 40.0;
 const DURATION_WIDTH: f32 = 64.0;
 
 fn push(app: &mut App, ui: &egui::Ui, action: LocalAction) {
-    app.local_files.actions.push(action);
+    app.local_library.actions.push(action);
     ui.ctx().request_repaint();
 }
 
@@ -47,7 +47,7 @@ fn paint_line(ui: &egui::Ui, text: &str, font: FontId, color: Color32, rect: Rec
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     ui.add_space(8.0);
-    if !app.local_files.is_loaded() {
+    if !app.local_library.is_loaded() {
         theme::spinner(ui, 24.0, palette.secondary);
         return;
     }
@@ -58,23 +58,23 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     folders(app, ui);
     scan_progress(app, ui);
 
-    if app.local_files.folders.is_empty() {
+    if app.local_library.folders.is_empty() {
         empty_library(app, ui);
         return;
     }
-    let rows = app.local_files.visible_rows();
+    let rows = app.local_library.visible_rows();
     if rows.is_empty() {
-        if app.local_files.scan.is_some() {
+        if app.local_library.scan.is_some() {
             return;
         }
-        let (title, body) = if app.local_files.filter.trim().is_empty() {
+        let (title, body) = if app.local_library.filter.trim().is_empty() {
             (
                 "No songs found".to_string(),
                 "These folders have no MP3, FLAC, M4A, OGG or WAV files.".to_string(),
             )
         } else {
             (
-                format!("No songs match “{}”", app.local_files.filter.trim()),
+                format!("No songs match “{}”", app.local_library.filter.trim()),
                 "Try another word, or clear the filter.".to_string(),
             )
         };
@@ -102,9 +102,9 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                 palette.secondary,
             );
             theme::text(ui, "Local Files", theme::bold(34.0), palette.text);
-            let count = app.local_files.tracks.len();
+            let count = app.local_library.tracks.len();
             let total_ms: u64 = app
-                .local_files
+                .local_library
                 .tracks
                 .iter()
                 .map(|track| u64::from(track.duration_ms))
@@ -130,8 +130,8 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
-        let playing_here = app.local_files.active && app.local_files.shown_playing();
-        let has_songs = !app.local_files.tracks.is_empty();
+        let playing_here = app.local_library.active && app.local_library.shown_playing();
+        let has_songs = !app.local_library.tracks.is_empty();
         let icon = if playing_here {
             Icon::PauseFilled
         } else {
@@ -149,18 +149,18 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
             )
         });
         if play.inner.clicked() {
-            if app.local_files.active && app.local_files.shown_track().is_some() {
+            if app.local_library.active && app.local_library.shown_track().is_some() {
                 push(app, ui, LocalAction::TogglePlay);
             } else {
-                let rows = app.local_files.visible_rows();
-                if app.local_files.shuffle {
+                let rows = app.local_library.visible_rows();
+                if app.local_library.shuffle {
                     push(app, ui, LocalAction::ShuffleAll(rows));
                 } else {
                     push(app, ui, LocalAction::Play { rows, index: 0 });
                 }
             }
         }
-        let shuffle = app.local_files.shuffle;
+        let shuffle = app.local_library.shuffle;
         if theme::icon_button(
             ui,
             Icon::Shuffle,
@@ -184,8 +184,8 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
         if theme::soft_button(ui, &palette, Some(Icon::Plus), "Add folder", false).clicked() {
             push(app, ui, LocalAction::AddFolder);
         }
-        if !app.local_files.folders.is_empty() {
-            let scanning = app.local_files.scan.is_some();
+        if !app.local_library.folders.is_empty() {
+            let scanning = app.local_library.scan.is_some();
             let rescan = ui.add_enabled_ui(!scanning, |ui| {
                 theme::soft_button(ui, &palette, Some(Icon::Refresh), "Rescan", false)
             });
@@ -209,7 +209,7 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
                         widgets::text_edit(
                             ui,
                             app.locale,
-                            egui::TextEdit::singleline(&mut app.local_files.filter)
+                            egui::TextEdit::singleline(&mut app.local_library.filter)
                                 .id(egui::Id::new("local-files-filter"))
                                 .hint_text(
                                     egui::RichText::new("Filter local files").color(palette.dim),
@@ -226,11 +226,11 @@ fn controls(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn folders(app: &mut App, ui: &mut egui::Ui) {
-    if app.local_files.folders.is_empty() {
+    if app.local_library.folders.is_empty() {
         return;
     }
     let palette = app.palette;
-    let folders = app.local_files.folders.clone();
+    let folders = app.local_library.folders.clone();
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         for folder in folders {
@@ -251,7 +251,7 @@ fn folders(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn scan_progress(app: &mut App, ui: &mut egui::Ui) {
-    let Some(scan) = &app.local_files.scan else {
+    let Some(scan) = &app.local_library.scan else {
         return;
     };
     let palette = app.palette;
@@ -321,7 +321,7 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
     let (heading, _) = ui.allocate_exact_size(vec2(width, HEADER_HEIGHT), Sense::hover());
     let mut heading_button = |ui: &mut egui::Ui, rect: Rect, label: &str, sort: LocalSort| {
         let response = ui.interact(rect, egui::Id::new(("local-sort", label)), Sense::click());
-        let active = app.local_files.sort == sort;
+        let active = app.local_library.sort == sort;
         let color = if active || response.hovered() {
             palette.text
         } else {
@@ -334,7 +334,7 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
                 .layout_no_wrap(label.to_string(), theme::medium(13.0), color)
                 .size()
                 .x;
-            let icon = if app.local_files.sort_descending {
+            let icon = if app.local_library.sort_descending {
                 Icon::ChevronDown
             } else {
                 Icon::ChevronUp
@@ -346,11 +346,11 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
             icon.image(color, 14.0).paint_at(ui, icon_rect);
         }
         if response.clicked() {
-            if app.local_files.sort == sort && sort != LocalSort::Artist {
-                app.local_files.sort_descending = !app.local_files.sort_descending;
+            if app.local_library.sort == sort && sort != LocalSort::Artist {
+                app.local_library.sort_descending = !app.local_library.sort_descending;
             } else {
-                app.local_files.sort = sort;
-                app.local_files.sort_descending = false;
+                app.local_library.sort = sort;
+                app.local_library.sort_descending = false;
             }
         }
         let _ = response.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -389,7 +389,7 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
         pos2(left + width - 12.0, heading.bottom()),
     );
     let clock_response = ui.interact(clock, egui::Id::new("local-sort-duration"), Sense::click());
-    let clock_color = if app.local_files.sort == LocalSort::Duration || clock_response.hovered() {
+    let clock_color = if app.local_library.sort == LocalSort::Duration || clock_response.hovered() {
         palette.text
     } else {
         palette.secondary
@@ -405,11 +405,11 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
         clock_color,
     );
     if clock_response.on_hover_text("Sort by length").clicked() {
-        if app.local_files.sort == LocalSort::Duration {
-            app.local_files.sort_descending = !app.local_files.sort_descending;
+        if app.local_library.sort == LocalSort::Duration {
+            app.local_library.sort_descending = !app.local_library.sort_descending;
         } else {
-            app.local_files.sort = LocalSort::Duration;
-            app.local_files.sort_descending = false;
+            app.local_library.sort = LocalSort::Duration;
+            app.local_library.sort_descending = false;
         }
     }
     ui.painter().hline(
@@ -425,7 +425,7 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
     let clip = ui.clip_rect();
     let first = (((clip.top() - area.top()) / ROW_HEIGHT).floor().max(0.0) as usize).min(count);
     let last = (((clip.bottom() - area.top()) / ROW_HEIGHT).ceil().max(0.0) as usize).min(count);
-    let playing = app.local_files.shown_playing();
+    let playing = app.local_library.shown_playing();
     for index in first..last {
         let track = &rows[index];
         let rect = Rect::from_min_size(
@@ -437,7 +437,7 @@ fn table(app: &mut App, ui: &mut egui::Ui, rows: Vec<LocalTrack>) {
             egui::Id::new(("local-file-row", &track.path)),
             Sense::click(),
         );
-        let current = app.local_files.is_current(&track.path);
+        let current = app.local_library.is_current(&track.path);
         if response.hovered() {
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(6), palette.surface_hover);
@@ -653,8 +653,8 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, region: Rect) {
     let palette = app.palette;
     let cy = region.center().y;
     let cover_rect = Rect::from_min_size(pos2(region.left() + 4.0, cy - 28.0), Vec2::splat(56.0));
-    let track = app.local_files.shown_track();
-    let cover = app.local_files.shown_cover().cloned();
+    let track = app.local_library.shown_track();
+    let cover = app.local_library.shown_cover().cloned();
     match &cover {
         Some(texture) => {
             egui::Image::new(texture)
@@ -744,18 +744,9 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, region: Rect) {
 fn transport(app: &mut App, ui: &mut egui::Ui, region: Rect) {
     let palette = app.palette;
     let cy = region.center().y - 8.0;
-    let playing = app.local_files.shown_playing();
-    // In a playlist's order, shuffle is the order's and repeat Spotify's.
-    let shuffle = app.mixed_shuffle().unwrap_or(app.local_files.shuffle);
-    let repeat = if app.mixed_shuffle().is_some() {
-        match app.local.repeat {
-            crate::player::RepeatMode::Off => Repeat::Off,
-            crate::player::RepeatMode::Context => Repeat::All,
-            crate::player::RepeatMode::Track => Repeat::One,
-        }
-    } else {
-        app.local_files.repeat
-    };
+    let playing = app.local_library.shown_playing();
+    let shuffle = app.local_library.shuffle;
+    let repeat = app.local_library.repeat;
     let dim = palette.secondary;
 
     let widths = [29.0, 30.0, 36.0, 30.0, 29.0];
@@ -870,9 +861,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, region: Rect) {
 
     let row_cy = cy + 31.0;
     let slider_width = (region.width() - 120.0).clamp(120.0, 620.0);
-    let duration = app.local_files.shown_duration_ms();
-    let position = app.local_files.shown_position_ms().min(duration.max(1));
-    let shown_position = match app.local_files.seek_preview {
+    let duration = app.local_library.shown_duration_ms();
+    let position = app.local_library.shown_position_ms().min(duration.max(1));
+    let shown_position = match app.local_library.seek_preview {
         Some(fraction) => (fraction * duration as f32) as u32,
         None => position,
     };
@@ -905,9 +896,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, region: Rect) {
         slider_width,
         None,
     ) {
-        SliderEvent::Dragging(value) => app.local_files.seek_preview = Some(value),
+        SliderEvent::Dragging(value) => app.local_library.seek_preview = Some(value),
         SliderEvent::Committed(value) => {
-            app.local_files.seek_preview = None;
+            app.local_library.seek_preview = None;
             if duration > 0 {
                 push(app, ui, LocalAction::Seek((value * duration as f32) as u32));
             }
@@ -944,9 +935,9 @@ fn extras(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.add_space(6.0);
     let level = app
-        .local_files
+        .local_library
         .volume_preview
-        .unwrap_or_else(|| app.local_files.effective_volume());
+        .unwrap_or_else(|| app.local_library.effective_volume());
     match thin_slider(
         ui,
         &palette,
@@ -957,11 +948,11 @@ fn extras(app: &mut App, ui: &mut egui::Ui) {
         Some(0.05),
     ) {
         SliderEvent::Dragging(value) => {
-            app.local_files.volume_preview = Some(value);
+            app.local_library.volume_preview = Some(value);
             push(app, ui, LocalAction::PreviewVolume(value));
         }
         SliderEvent::Committed(value) => {
-            app.local_files.volume_preview = None;
+            app.local_library.volume_preview = None;
             push(app, ui, LocalAction::SetVolume(value));
         }
         SliderEvent::None => {}

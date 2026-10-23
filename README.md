@@ -8,7 +8,10 @@ client) with a few additions:
   bar, shuffle, repeat and covers.
 - **Local files in your playlists.** Right-click a song in Local Files and
   choose **Add to playlist**. It goes into your real Spotify playlist, the
-  same way Spotify's own app adds local files, and plays from this computer.
+  same way Spotify's own app adds local files. In playlists, local songs play
+  in order with the rest, shuffle included, from the folder set in
+  **Settings > Playback > Local files** (your first Local Files folder, unless
+  you choose another).
 - **Monthly listeners** on artist pages.
 - **Song credits.** Right-click a song and choose **Show credits**.
 - **Jam with friends who use this app.** Click **Jam** in the sidebar to start one and share its code, or enter a friend's code to join. Everyone hears the same song at the same time, each on their own Spotify Premium; anyone can play, pause, skip and add songs.

@@ -105,19 +105,18 @@ impl App {
 
     fn jam_connect(&mut self, code: String, host: bool, ctx: &egui::Context) {
         let Some(relay) = crate::jam::RELAY else {
-            self.local_files.jam.error = Some("Jam isn't set up in this build yet.".into());
+            self.local_library.jam.error = Some("Jam isn't set up in this build yet.".into());
             return;
         };
         if !matches!(self.target(), Target::Local) {
-            self.local_files.jam.error =
+            self.local_library.jam.error =
                 Some("Jam plays on this computer. Turn on playback here in Settings.".into());
             return;
         }
-        self.end_mixed(ctx);
-        let name = if self.local_files.jam.name.trim().is_empty() {
+        let name = if self.local_library.jam.name.trim().is_empty() {
             self.jam_default_name()
         } else {
-            self.local_files.jam.name.trim().to_string()
+            self.local_library.jam.name.trim().to_string()
         };
         let connection = Connection::open(relay, &code, ctx.clone());
         connection.send(&json!({
@@ -126,8 +125,8 @@ impl App {
             "id": format!("{:016x}", rand::random::<u64>()),
             "host": host,
         }));
-        self.local_files.jam.error = None;
-        self.local_files.jam.session = Some(Session {
+        self.local_library.jam.error = None;
+        self.local_library.jam.session = Some(Session {
             connection,
             code,
             host,
@@ -149,24 +148,24 @@ impl App {
     }
 
     pub fn jam_join(&mut self, ctx: &egui::Context) {
-        match clean_code(&self.local_files.jam.code_input) {
+        match clean_code(&self.local_library.jam.code_input) {
             Some(code) => self.jam_connect(code, false, ctx),
             None => {
-                self.local_files.jam.error = Some("A Jam code has 6 letters and numbers.".into())
+                self.local_library.jam.error = Some("A Jam code has 6 letters and numbers.".into())
             }
         }
     }
 
     pub fn jam_leave(&mut self) {
-        if self.local_files.jam.session.take().is_some() {
+        if self.local_library.jam.session.take().is_some() {
             self.toast("You left the Jam");
         }
     }
 
     /// What this computer plays, from whichever player has the bar.
     fn jam_playing(&self) -> Option<Playing> {
-        if self.local_files.active {
-            let track = self.local_files.shown_track()?;
+        if self.local_library.active {
+            let track = self.local_library.shown_track()?;
             return Some(Playing {
                 uri: crate::extras::local_uri(
                     &track.artist,
@@ -177,8 +176,8 @@ impl App {
                 title: track.title.clone(),
                 artist: track.artist.clone(),
                 duration_ms: track.duration_ms,
-                position_ms: self.local_files.position_ms,
-                playing: self.local_files.shown_playing(),
+                position_ms: self.local_library.position_ms,
+                playing: self.local_library.shown_playing(),
             });
         }
         let now = self.now_playing()?;
@@ -201,7 +200,7 @@ impl App {
     pub(crate) fn jam_frame(&mut self, ctx: &egui::Context) {
         let mut messages = Vec::new();
         let mut closed = None;
-        if let Some(session) = &self.local_files.jam.session {
+        if let Some(session) = &self.local_library.jam.session {
             while let Some(incoming) = session.connection.try_recv() {
                 match incoming {
                     Incoming::Message(message) => messages.push(message),
@@ -215,21 +214,21 @@ impl App {
             self.jam_message(message, ctx);
         }
         if let Some(reason) = closed {
-            let was_joined = self.local_files.jam.in_jam();
-            self.local_files.jam.session = None;
+            let was_joined = self.local_library.jam.in_jam();
+            self.local_library.jam.session = None;
             if !reason.is_empty() {
                 if was_joined {
                     self.toast(reason.clone());
                 }
-                self.local_files.jam.error = Some(reason);
+                self.local_library.jam.error = Some(reason);
             }
             return;
         }
-        if !self.local_files.jam.in_jam() {
+        if !self.local_library.jam.in_jam() {
             return;
         }
         if self
-            .local_files
+            .local_library
             .jam
             .session
             .as_ref()
@@ -247,7 +246,7 @@ impl App {
         let local_now = now_ms();
         match kind.as_str() {
             "welcome" => {
-                let Some(session) = self.local_files.jam.session.as_mut() else {
+                let Some(session) = self.local_library.jam.session.as_mut() else {
                     return;
                 };
                 session.joined = true;
@@ -275,20 +274,20 @@ impl App {
                 // A code that happens to be taken: try another.
                 let retry = message["code"].as_str() == Some("taken")
                     && self
-                        .local_files
+                        .local_library
                         .jam
                         .session
                         .as_ref()
                         .is_some_and(|s| s.host);
-                self.local_files.jam.session = None;
+                self.local_library.jam.session = None;
                 if retry {
                     self.jam_start(ctx);
                 } else {
-                    self.local_files.jam.error = Some(reason);
+                    self.local_library.jam.error = Some(reason);
                 }
             }
             "pong" => {
-                let Some(session) = self.local_files.jam.session.as_mut() else {
+                let Some(session) = self.local_library.jam.session.as_mut() else {
                     return;
                 };
                 if let (Some(sent), Some(server)) =
@@ -302,7 +301,7 @@ impl App {
                 }
             }
             "members" => {
-                if let Some(session) = self.local_files.jam.session.as_mut() {
+                if let Some(session) = self.local_library.jam.session.as_mut() {
                     let before = session.members.len();
                     session.members = members(&message["members"]);
                     let after = session.members.len();
@@ -314,20 +313,20 @@ impl App {
             }
             "state" => {
                 if let Some(state) = host_state(&message)
-                    && let Some(session) = self.local_files.jam.session.as_mut()
+                    && let Some(session) = self.local_library.jam.session.as_mut()
                 {
                     session.host_state = Some(state);
                 }
             }
             "queue" => {
-                if let Some(session) = self.local_files.jam.session.as_mut() {
+                if let Some(session) = self.local_library.jam.session.as_mut() {
                     session.queue = queue(&message["items"]);
                 }
             }
             "queued" => {
                 let item = &message["item"];
                 let is_host = self
-                    .local_files
+                    .local_library
                     .jam
                     .session
                     .as_ref()
@@ -344,7 +343,7 @@ impl App {
             }
             "command" => {
                 if self
-                    .local_files
+                    .local_library
                     .jam
                     .session
                     .as_ref()
@@ -356,7 +355,7 @@ impl App {
             "ended" => {
                 let reason = message["message"].as_str().unwrap_or("The Jam ended.");
                 self.toast(reason.to_string());
-                self.local_files.jam.session = None;
+                self.local_library.jam.session = None;
             }
             _ => {}
         }
@@ -365,7 +364,7 @@ impl App {
     /// Host: tells the relay what plays when it changes, and now and then.
     fn jam_host_frame(&mut self) {
         let playing = self.jam_playing();
-        let Some(session) = self.local_files.jam.session.as_mut() else {
+        let Some(session) = self.local_library.jam.session.as_mut() else {
             return;
         };
         let Some(playing) = playing else {
@@ -412,7 +411,7 @@ impl App {
     /// Guest: plays what the host plays, where the host is.
     fn jam_guest_frame(&mut self, ctx: &egui::Context) {
         let mine = self.jam_playing();
-        let Some(session) = self.local_files.jam.session.as_mut() else {
+        let Some(session) = self.local_library.jam.session.as_mut() else {
             return;
         };
         let Some(state) = session.host_state.clone() else {
@@ -440,11 +439,11 @@ impl App {
         if !same_song {
             session.settle_until = Some(Instant::now() + SETTLE);
             if state.uri.starts_with("spotify:local:") {
-                match self.local_files.find_uri(&state.uri) {
+                match self.local_library.find_uri(&state.uri) {
                     Some(track) => {
                         self.play_local_rows(vec![track], 0, ctx);
                         if target_ms > 1_000 {
-                            self.local_files.position_ms = target_ms;
+                            self.local_library.position_ms = target_ms;
                             self.local_send(ctx, LocalCommand::Seek(target_ms));
                         }
                         if !state.playing {
@@ -454,13 +453,13 @@ impl App {
                     None => {
                         // Not on this computer: wait quietly for the next one.
                         let told = self
-                            .local_files
+                            .local_library
                             .jam
                             .session
                             .as_ref()
                             .and_then(|session| session.missing_told.clone());
                         if told.as_deref() != Some(state.uri.as_str()) {
-                            if self.local_files.active && self.local_files.shown_playing() {
+                            if self.local_library.active && self.local_library.shown_playing() {
                                 self.toggle_local_play(ctx);
                             } else if self.spotify_playing() {
                                 self.toggle_play();
@@ -469,7 +468,7 @@ impl App {
                                 "The host is playing {}, a local file you don't have",
                                 state.title
                             ));
-                            if let Some(session) = self.local_files.jam.session.as_mut() {
+                            if let Some(session) = self.local_library.jam.session.as_mut() {
                                 session.missing_told = Some(state.uri.clone());
                             }
                         }
@@ -494,7 +493,7 @@ impl App {
         };
         if mine.playing != state.playing {
             session.settle_until = Some(Instant::now() + SETTLE);
-            if self.local_files.active {
+            if self.local_library.active {
                 self.toggle_local_play(ctx);
             } else {
                 self.toggle_play();
@@ -503,8 +502,8 @@ impl App {
         }
         if state.playing && (i64::from(mine.position_ms) - target).abs() > DRIFT_MS {
             session.settle_until = Some(Instant::now() + SETTLE);
-            if self.local_files.active {
-                self.local_files.position_ms = target_ms;
+            if self.local_library.active {
+                self.local_library.position_ms = target_ms;
                 self.local_send(ctx, LocalCommand::Seek(target_ms));
             } else {
                 self.seek(target_ms);
@@ -558,7 +557,7 @@ impl App {
     /// Guests' controls go to the host; anyone's added songs go to the
     /// Jam's shared list. Returns the action when the Jam leaves it alone.
     pub(crate) fn jam_take(&mut self, action: Action) -> Option<Action> {
-        let Some(session) = self.local_files.jam.session.as_ref() else {
+        let Some(session) = self.local_library.jam.session.as_ref() else {
             return Some(action);
         };
         if !session.joined {
@@ -614,7 +613,7 @@ impl App {
     /// Guest: the local bar's controls go to the host too.
     pub(crate) fn jam_take_local(&mut self, action: &LocalAction) -> bool {
         let guest = self
-            .local_files
+            .local_library
             .jam
             .session
             .as_ref()

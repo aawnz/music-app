@@ -1,8 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index fd708c1..36c2b43 100644
+index 9e785bc..5bedcfd 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -137,7 +137,10 @@ protobuf = "3"
+@@ -142,7 +142,10 @@ protobuf = "3"
  # rodio backend unwraps the device open on the player thread, and a release
  # build aborts on panic, so it is left out. rodio supplies the mixer and the
  # queue only; fastframe-audio below owns the device stream.
@@ -14,10 +14,12 @@ index fd708c1..36c2b43 100644
  # `socks` is SOCKS5 proxy support for the Web API, artwork, lyrics, and
  # update checks. HTTP proxies work without it. `system-proxy` reads the OS
  # proxy on macOS and Windows when the mode is System; Linux uses environment
-@@ -171,6 +174,10 @@ rand = "0.9"
+@@ -176,6 +179,12 @@ rand = "0.9"
  open = "5"
  percent-encoding = "2"
  urlencoding = "2"
++# The Music folder, offered first when adding a Local Files folder.
++directories = "6"
 +# Spotifast Jam: the WebSocket to the Jam relay (already in the build for
 +# librespot's own connection).
 +tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
@@ -26,30 +28,30 @@ index fd708c1..36c2b43 100644
  mdns-sd = "0.21"
  unicode-bidi = "0.3"
 diff --git a/src/app.rs b/src/app.rs
-index ceea55b..eed5050 100644
+index e3f93e4..6419758 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -669,6 +669,10 @@ pub struct App {
+@@ -762,6 +762,10 @@ pub struct App {
      /// The window's pixels per point when it last drew, so artwork chosen
      /// away from the drawing code fits the display it lands on.
      pub pixels_per_point: f32,
 +    /// Songs from folders on this computer, and their own player.
-+    pub local_files: local_files::LocalFiles,
++    pub local_library: local_files::LocalFiles,
 +    /// Monthly listeners, song credits and adding to playlists.
 +    pub extras: extras::Extras,
  }
  
  /// How many plays the Home shelf asks for: it shows sixteen cards.
-@@ -1106,6 +1110,8 @@ impl App {
+@@ -1279,6 +1283,8 @@ impl App {
              winamp: crate::winamp::WinampState::new(session.winamp_pos, tap, eq),
              player_bar_analyser: crate::vis::WideAnalyser::default(),
              pixels_per_point: 1.0,
-+            local_files: local_files::LocalFiles::default(),
++            local_library: local_files::LocalFiles::default(),
 +            extras: extras::Extras::default(),
          };
          app.local.volume = app.settings.volume;
-         // What was played here is on disk and needs nothing from the
-@@ -2177,6 +2183,7 @@ impl App {
+         if let Some(folder) = app.settings.local_files_folder() {
+@@ -2608,6 +2614,7 @@ impl App {
                      generation,
                      result,
                  } => self.receive_radio(&seed, generation, result),
@@ -57,7 +59,7 @@ index ceea55b..eed5050 100644
                  Event::Prerelease {
                      uri,
                      generation,
-@@ -2498,6 +2505,7 @@ impl App {
+@@ -2959,6 +2966,7 @@ impl App {
                  }
              }
              Page::Settings => {}
@@ -65,46 +67,15 @@ index ceea55b..eed5050 100644
          }
      }
  
-@@ -2614,6 +2622,7 @@ impl App {
-     }
- 
-     fn handle_local(&mut self, state: LocalState) {
-+        self.local_handoff_track(&state);
-         if self
-             .local_transfer_sequence
-             .is_some_and(|sequence| sequence != state.track_sequence)
-@@ -2632,6 +2641,8 @@ impl App {
-             && self
-                 .shuffle_set_at
-                 .is_none_or(|at| at.elapsed() > Duration::from_secs(5))
-+            // A playlist in the app's order keeps librespot unshuffled.
-+            && !self.mixed_active()
-         {
-             // Accept shuffle changes made by another client.
-             self.shuffle_wanted = state.shuffle;
-@@ -2662,7 +2673,13 @@ impl App {
-         {
-             controls.seeked(Duration::from_millis(u64::from(state.position_ms)));
-         }
-+        // A playlist's local file: Spotify skips it, and Local Files plays
-+        // it from this computer when the song before it ends (see
-+        // `local_handoff_track`). No error to show.
-         if let Some(error) = &state.error
-+            && error.starts_with("This item isn't available: spotify:local:")
-+        {
-+        } else if let Some(error) = &state.error
-             && self.local.error.as_deref() != Some(error.as_str())
-         {
-             self.toast_error(engine_error_text(self.locale, error));
-@@ -4547,6 +4564,7 @@ impl App {
+@@ -5111,6 +5119,7 @@ impl App {
                  }
              }
-             Page::Settings => {}
+             Page::Settings => self.refresh_autostart(),
 +            Page::LocalFiles => {}
          }
      }
  
-@@ -9462,6 +9480,11 @@ impl App {
+@@ -10391,6 +10400,11 @@ impl App {
      /// Apply one queued UI action after drawing, updating optimistic local state
      /// and scheduling any backend work or preference persistence it requires.
      pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
@@ -116,7 +87,7 @@ index ceea55b..eed5050 100644
          if matches!(
              &action,
              Action::Open(_)
-@@ -10998,6 +11021,7 @@ impl App {
+@@ -12080,6 +12094,7 @@ impl App {
          #[cfg(feature = "milkdrop")]
          self.sync_milkdrop(ctx);
          self.apply_actions(ctx);
@@ -124,7 +95,7 @@ index ceea55b..eed5050 100644
          self.sync_media_controls(ctx);
          self.sync_window_title(ctx);
          self.remember_geometry(ctx);
-@@ -11329,6 +11353,7 @@ impl App {
+@@ -12434,6 +12449,7 @@ impl App {
              crate::ui::show(self, ui);
          }
          self.apply_actions(ctx);
@@ -132,7 +103,7 @@ index ceea55b..eed5050 100644
          let autoscroll = self.autoscroll.finish(
              ctx,
              crate::autoscroll::enabled(self.settings.middle_click_autoscroll),
-@@ -11975,6 +12000,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
+@@ -13093,6 +13109,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
      }
  }
  
@@ -142,10 +113,10 @@ index ceea55b..eed5050 100644
  
  #[cfg(test)]
 diff --git a/src/backend.rs b/src/backend.rs
-index 3948e40..2966ffd 100644
+index 6e2c530..3db9796 100644
 --- a/src/backend.rs
 +++ b/src/backend.rs
-@@ -797,6 +797,14 @@ pub enum Command {
+@@ -892,6 +892,14 @@ pub enum Command {
          generation: u64,
          result: Result<Box<crate::prerelease::Prerelease>, String>,
      },
@@ -160,7 +131,7 @@ index 3948e40..2966ffd 100644
      /// Internal: a radio finished resolving for the session it started in.
      RadioResolved {
          session_generation: u64,
-@@ -936,6 +944,8 @@ pub enum Event {
+@@ -1068,6 +1076,8 @@ pub enum Event {
          generation: u64,
          result: Result<(), String>,
      },
@@ -169,7 +140,7 @@ index 3948e40..2966ffd 100644
      /// Whether Spotify's internal metadata positively identifies an album as an EP.
      AlbumType {
          uri: String,
-@@ -2441,6 +2451,15 @@ impl Worker {
+@@ -2718,6 +2728,15 @@ impl Worker {
                          });
                      }
                  }
@@ -185,7 +156,7 @@ index 3948e40..2966ffd 100644
                  Command::Radio { seed, generation } => {
                      self.radio_waiting.insert(seed, generation);
                      self.start_radio();
-@@ -3905,6 +3924,33 @@ impl Worker {
+@@ -4298,6 +4317,33 @@ impl Worker {
          });
      }
  
@@ -220,11 +191,11 @@ index 3948e40..2966ffd 100644
          if let Some((uri, generation)) = self.prerelease_waiting.take() {
              self.emit(Event::Prerelease {
 diff --git a/src/lib.rs b/src/lib.rs
-index 22c93c2..a552b55 100644
+index b3ab697..cee6436 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -15,13 +15,16 @@ pub mod credentials;
- pub mod demo;
+@@ -16,13 +16,16 @@ pub mod demo;
+ pub mod device_history;
  pub mod emoji;
  pub mod eq;
 +pub mod extras;
@@ -241,10 +212,10 @@ index 22c93c2..a552b55 100644
  #[cfg(target_os = "macos")]
  pub mod mac_links;
 diff --git a/src/model.rs b/src/model.rs
-index 1309d13..e54e949 100644
+index 4ce2542..ad5144c 100644
 --- a/src/model.rs
 +++ b/src/model.rs
-@@ -125,6 +125,8 @@ pub enum Page {
+@@ -127,6 +127,8 @@ pub enum Page {
      Radio(String),
      Queue,
      Settings,
@@ -253,7 +224,7 @@ index 1309d13..e54e949 100644
  }
  
  impl Page {
-@@ -145,6 +147,7 @@ impl Page {
+@@ -148,6 +150,7 @@ impl Page {
              Page::Radio(seed) => format!("radio:{seed}"),
              Page::Queue => "queue".into(),
              Page::Settings => "settings".into(),
@@ -261,7 +232,7 @@ index 1309d13..e54e949 100644
          }
      }
  
-@@ -160,6 +163,7 @@ impl Page {
+@@ -164,6 +167,7 @@ impl Page {
              "episodes" => Page::Episodes,
              "queue" => Page::Queue,
              "settings" => Page::Settings,
@@ -270,10 +241,10 @@ index 1309d13..e54e949 100644
                  let (kind, id) = other.split_once(':')?;
                  match kind {
 diff --git a/src/ui/artist.rs b/src/ui/artist.rs
-index b581448..3e7598c 100644
+index 4e28b4a..ddd6f04 100644
 --- a/src/ui/artist.rs
 +++ b/src/ui/artist.rs
-@@ -317,6 +317,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
+@@ -324,6 +324,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
  fn artist_hero(app: &mut App, ui: &mut egui::Ui, artist: &Artist, preview: Option<&Artist>) {
      let locale = app.locale;
      let mut byline = Vec::new();
@@ -287,14 +258,15 @@ index b581448..3e7598c 100644
          byline.push((
              ngettext(
 diff --git a/src/ui/mod.rs b/src/ui/mod.rs
-index f31a4d4..1714ac8 100644
+index 6520493..39659d4 100644
 --- a/src/ui/mod.rs
 +++ b/src/ui/mod.rs
-@@ -6,9 +6,12 @@ pub mod artist;
+@@ -6,10 +6,13 @@ pub mod artist;
  pub mod collection;
  pub(crate) mod devices;
  mod dialogs;
 +mod extras;
+ pub(crate) mod friends;
  pub mod home;
 +mod jam;
  mod keys;
@@ -302,13 +274,13 @@ index f31a4d4..1714ac8 100644
 +pub mod local_files;
  pub mod login;
  mod lyrics;
- pub mod player_bar;
-@@ -63,7 +66,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+ pub mod new_releases;
+@@ -65,7 +68,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
              ),
          );
      }
 -    player_bar::show(app, ui);
-+    if app.local_files.active {
++    if app.local_library.active {
 +        local_files::player_bar(app, ui);
 +    } else {
 +        player_bar::show(app, ui);
@@ -316,7 +288,7 @@ index f31a4d4..1714ac8 100644
      if app.lyrics_fullscreen.is_some() {
          lyrics::fullscreen(app, ui);
      } else {
-@@ -81,6 +88,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -86,6 +93,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
      }
      devices::popup(app, ctx);
      dialogs::show(app, ctx);
@@ -325,7 +297,7 @@ index f31a4d4..1714ac8 100644
      update::show(app, ctx);
      widgets::drag_ghost(ctx, &app.palette, app.locale);
      toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
-@@ -266,7 +275,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -279,7 +288,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
              let page = app.page().clone();
              let overview = matches!(
                  page,
@@ -334,7 +306,7 @@ index f31a4d4..1714ac8 100644
              );
              // The wash belongs to the page's hero, so it scrolls away with
              // it. The page's offset is known once it has been laid out, so
-@@ -316,6 +325,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -330,6 +339,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                                  Page::Radio(seed) => radio::radio(app, ui, &seed),
                                  Page::Queue => queue::page(app, ui),
                                  Page::Settings => settings::show(app, ui),
@@ -342,55 +314,39 @@ index f31a4d4..1714ac8 100644
                              }
                          });
                  },
-diff --git a/src/ui/player_bar.rs b/src/ui/player_bar.rs
-index b50faf4..a8682dc 100644
---- a/src/ui/player_bar.rs
-+++ b/src/ui/player_bar.rs
-@@ -589,7 +589,10 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
-     let enabled = now.is_some_and(|now| now.can_control) || app.is_connected();
-     let playing = now.is_some_and(|now| now.playing);
-     let loading = now.is_some_and(|now| now.loading);
--    let shuffle = now.map_or_else(|| app.playing_context_shuffle(), |now| now.shuffle);
-+    // A playlist with local files plays in the app's order: its shuffle.
-+    let shuffle = app
-+        .mixed_shuffle()
-+        .unwrap_or_else(|| now.map_or_else(|| app.playing_context_shuffle(), |now| now.shuffle));
-     let repeat = now.map(|now| now.repeat).unwrap_or_default();
-     let dim = if enabled {
-         palette.secondary
 diff --git a/src/ui/sidebar.rs b/src/ui/sidebar.rs
-index 82b4ba9..df1336f 100644
+index ca1b465..4bc75ef 100644
 --- a/src/ui/sidebar.rs
 +++ b/src/ui/sidebar.rs
-@@ -596,6 +596,10 @@ fn paint_grid_art_mask(app: &App, ui: &egui::Ui, rect: Rect) {
+@@ -636,6 +636,10 @@ fn paint_grid_art_mask(app: &App, ui: &egui::Ui, rect: Rect) {
  }
  
  fn has_expanded_art(app: &App) -> bool {
-+    if app.local_files.active {
++    if app.local_library.active {
 +        // A local song's own cover, when it has one.
-+        return app.settings.art_expanded && app.local_files.shown_cover().is_some();
++        return app.settings.art_expanded && app.local_library.shown_cover().is_some();
 +    }
      app.settings.art_expanded
          && app
              .now_playing()
-@@ -610,6 +614,10 @@ fn expanded_art_side(ui: &egui::Ui) -> f32 {
+@@ -650,6 +654,10 @@ fn expanded_art_side(ui: &egui::Ui) -> f32 {
  }
  
  fn paint_expanded_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
-+    if app.local_files.active {
++    if app.local_library.active {
 +        paint_expanded_local_art(app, ui, rect);
 +        return;
 +    }
      let Some(now) = app.now_playing() else {
          return;
      };
-@@ -672,6 +680,55 @@ fn paint_expanded_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
+@@ -712,6 +720,55 @@ fn paint_expanded_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
      }
  }
  
 +/// The local song's cover, large, with the same way back down.
 +fn paint_expanded_local_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
-+    let Some(texture) = app.local_files.shown_cover().cloned() else {
++    let Some(texture) = app.local_library.shown_cover().cloned() else {
 +        return;
 +    };
 +    let palette = app.palette;
@@ -440,7 +396,7 @@ index 82b4ba9..df1336f 100644
  /// Project the playlist shelf without changing its saved order or pins.
  /// Ownership filtering is flat, like text search, so matching playlists in
  /// collapsed folders remain reachable. Liked Songs belongs to the account.
-@@ -933,6 +990,33 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
+@@ -983,6 +1040,33 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
      {
          app.actions.push(Action::FocusSearch);
      }
@@ -456,7 +412,7 @@ index 82b4ba9..df1336f 100644
 +        app.actions.push(Action::Open(Page::LocalFiles));
 +    }
 +    // Listening together with friends who use Spotifast.
-+    let jam_label = match app.local_files.jam.session.as_ref().filter(|s| s.joined) {
++    let jam_label = match app.local_library.jam.session.as_ref().filter(|s| s.joined) {
 +        Some(session) => format!("Jam · {}", session.members.len()),
 +        None => "Jam".to_string(),
 +    };
@@ -465,17 +421,17 @@ index 82b4ba9..df1336f 100644
 +        &palette,
 +        Icon::Users,
 +        &jam_label,
-+        app.local_files.jam.open || app.local_files.jam.in_jam(),
++        app.local_library.jam.open || app.local_library.jam.in_jam(),
 +    )
 +    .clicked()
 +    {
-+        app.local_files.jam.open = true;
++        app.local_library.jam.open = true;
 +    }
      ui.add_space(10.0);
      ui.painter().hline(
          ui.max_rect().x_range().shrink(4.0),
 diff --git a/src/ui/widgets.rs b/src/ui/widgets.rs
-index a742097..ef01361 100644
+index 22932f5..c7d8655 100644
 --- a/src/ui/widgets.rs
 +++ b/src/ui/widgets.rs
 @@ -526,7 +526,7 @@ pub fn menu_submenu<R>(
@@ -487,7 +443,7 @@ index a742097..ef01361 100644
      ui: &mut Ui,
      palette: &Palette,
      icon: Option<Icon>,
-@@ -977,6 +977,13 @@ pub fn item_menu(
+@@ -1014,6 +1014,13 @@ fn item_menu_at(
              app.actions.push(Action::ToggleSaved(uri.clone()));
          }
          add_to_playlist_menu(ui, app, std::slice::from_ref(item));
@@ -501,7 +457,7 @@ index a742097..ef01361 100644
      } else if menu_item(
          ui,
          &palette,
-@@ -1249,6 +1256,26 @@ pub(crate) fn row_playable(item: &PlayableItem) -> bool {
+@@ -1311,6 +1318,26 @@ pub(crate) fn row_playable(item: &PlayableItem) -> bool {
              if track.is_local || track.is_playable == Some(false))
  }
  
@@ -510,7 +466,7 @@ index a742097..ef01361 100644
 +    if local {
 +        // The list is gathered after drawing: a playlist's page is out of
 +        // the app while its rows are drawn.
-+        app.local_files
++        app.local_library
 +            .actions
 +            .push(crate::app::local_files::LocalAction::PlayRow {
 +                context: row.context.clone(),
@@ -528,51 +484,58 @@ index a742097..ef01361 100644
  /// Describes one row of a track table.
  pub struct TrackRow<'a> {
      pub index: usize,
-@@ -1404,7 +1431,11 @@ fn track_row_contents(
+@@ -1488,7 +1515,14 @@ fn track_row_contents(
      let width = ui.available_width();
      let (rect, response) = ui.allocate_exact_size(vec2(width, row_height), Sense::click_and_drag());
      let rect = rect.translate(vec2(0.0, row.shift));
--    let unavailable = !row_playable(row.item);
-+    // A playlist's local file plays from this computer when Local Files
-+    // has found it.
-+    let local = row.item.uri().starts_with("spotify:local:")
-+        && app.local_files.find_uri(row.item.uri()).is_some();
-+    let unavailable = !row_playable(row.item) && !local;
+-    let unavailable = !app.row_playable(row.item);
++    // A playlist's local file Spotify's player cannot play (no folder for
++    // it in Settings, or a file it does not read) plays from Local Files
++    // when the library has it.
++    let spotify_can = app.row_playable(row.item);
++    let local = !spotify_can
++        && row.item.uri().starts_with("spotify:local:")
++        && app.local_library.find_uri(row.item.uri()).is_some();
++    let unavailable = !spotify_can && !local;
      response.widget_info(|| {
          egui::WidgetInfo::selected(
              egui::WidgetType::Button,
-@@ -1469,11 +1500,25 @@ fn track_row_contents(
-     // A queue row is a position, not the song itself: the same song can
-     // sit in the queue while it plays (a repeat wrapping around, a song
-     // queued twice), and only the Now playing row is the playing one.
+@@ -1556,13 +1590,27 @@ fn track_row_contents(
+     // A song started from one of its copies in this list marks that copy
+     // alone: the others are other places in the list.
+     let played_copy = app.row_is_played_copy(row.context, row.index, row.item.uri());
 -    let is_current = !matches!(row.context, RowContext::Queue)
+-        && played_copy
 -        && app
 -            .current_track_uri()
 -            .is_some_and(|uri| uri == row.item.uri());
+-    let pending = played_copy && app.play_pending(row.item.uri());
 -    let playing = is_current && app.believed_playing();
 +    // While Local Files has the bar, its song is the playing one: a
 +    // playlist's local row lights up, and Spotify's paused song is just a
 +    // row that plays when clicked.
-+    let (is_current, playing) = if app.local_files.active {
++    let (is_current, pending, playing) = if app.local_library.active {
 +        let current = local
 +            && !matches!(row.context, RowContext::Queue)
-+            && app.local_files.shown_track().is_some_and(|shown| {
-+                app.local_files
++            && app.local_library.shown_track().is_some_and(|shown| {
++                app.local_library
 +                    .find_uri(row.item.uri())
 +                    .is_some_and(|track| track.path == shown.path)
 +            });
-+        (current, current && app.local_files.shown_playing())
++        (current, false, current && app.local_library.shown_playing())
 +    } else {
-+        let current = !matches!(row.context, RowContext::Queue)
++        let is_current = !matches!(row.context, RowContext::Queue)
++            && played_copy
 +            && app
 +                .current_track_uri()
 +                .is_some_and(|uri| uri == row.item.uri());
-+        (current, current && app.believed_playing())
++        let pending = played_copy && app.play_pending(row.item.uri());
++        (is_current, pending, is_current && app.believed_playing())
 +    };
      let hovered = ui.is_enabled() && (ui.rect_contains_pointer(rect) || response.has_focus());
      if row.picked {
          // Keep the existing translucent selection, using a neutral palette
-@@ -1940,11 +1985,7 @@ fn track_row_contents(
+@@ -2053,11 +2101,7 @@ fn track_row_contents(
      let mut pick = None;
      let accessible_click = response.clicked() && response.interact_pointer_pos().is_none();
      if ui.is_enabled() && (response.double_clicked() || accessible_click) && !unavailable {
@@ -585,7 +548,7 @@ index a742097..ef01361 100644
      } else if ui.is_enabled() && response.clicked() {
          // The cell that holds the play control: the number column when
          // there is one, the cover when there is not.
-@@ -1965,11 +2006,7 @@ fn track_row_contents(
+@@ -2078,11 +2122,7 @@ fn track_row_contents(
              if is_current {
                  app.actions.push(Action::TogglePlay);
              } else {

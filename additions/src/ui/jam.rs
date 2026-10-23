@@ -7,7 +7,7 @@ use crate::app::App;
 use crate::theme;
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
-    if !app.local_files.jam.open {
+    if !app.local_library.jam.open {
         return;
     }
     let palette = app.palette;
@@ -31,7 +31,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         }))
         .show(ctx, |ui| {
             ui.set_width(380.0);
-            let jam = &mut app.local_files.jam;
+            let jam = &mut app.local_library.jam;
             theme::text(ui, "Jam", theme::bold(20.0), palette.text);
             ui.add_space(4.0);
             let note = |ui: &mut egui::Ui, text: &str| {
@@ -184,6 +184,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         app.jam_leave();
     }
     if close || response.should_close() {
-        app.local_files.jam.open = false;
+        app.local_library.jam.open = false;
     }
 }
