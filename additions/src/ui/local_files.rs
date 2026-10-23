@@ -654,21 +654,49 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, region: Rect) {
     let cy = region.center().y;
     let cover_rect = Rect::from_min_size(pos2(region.left() + 4.0, cy - 28.0), Vec2::splat(56.0));
     let track = app.local_files.shown_track();
-    let serial = app.local_files.status.track_serial;
-    let same_song = track.as_ref().map(|track| &track.path)
-        == app
-            .local_files
-            .status
-            .current
-            .as_ref()
-            .map(|current| &current.path);
-    match &app.local_files.cover {
-        Some((for_serial, texture)) if *for_serial == serial && same_song => {
+    let cover = app.local_files.shown_cover().cloned();
+    match &cover {
+        Some(texture) => {
             egui::Image::new(texture)
                 .corner_radius(CornerRadius::same(6))
                 .paint_at(ui, cover_rect);
         }
-        _ => widgets::paint_cover(ui, &palette, None, cover_rect, 6.0, Icon::Music, None),
+        None => widgets::paint_cover(ui, &palette, None, cover_rect, 6.0, Icon::Music, None),
+    }
+    // Hovering the cover offers to show it large at the sidebar's bottom,
+    // as for Spotify's songs.
+    let offer_expand =
+        cover.is_some() && !app.settings.art_expanded && app.settings.sidebar_visible;
+    if offer_expand {
+        let cover_response = ui.interact(
+            cover_rect,
+            egui::Id::new("local-now-playing-cover"),
+            Sense::hover(),
+        );
+        let expand_rect = Rect::from_center_size(
+            pos2(cover_rect.right() - 10.0, cover_rect.top() + 10.0),
+            Vec2::splat(18.0),
+        );
+        if cover_response.hovered() || ui.rect_contains_pointer(expand_rect) {
+            let expand = ui.interact(
+                expand_rect,
+                egui::Id::new("local-now-playing-art-expand"),
+                Sense::click(),
+            );
+            ui.painter().circle_filled(
+                expand_rect.center(),
+                9.0,
+                palette.panel.gamma_multiply(0.9),
+            );
+            Icon::ChevronUp.image(palette.text, 12.0).paint_at(
+                ui,
+                Rect::from_center_size(expand_rect.center(), Vec2::splat(12.0)),
+            );
+            if expand.clicked() {
+                app.settings.art_expanded = true;
+                app.actions.push(crate::model::Action::SettingsChanged);
+            }
+        }
     }
     let text_left = cover_rect.right() + 12.0;
     let text_rect = Rect::from_min_size(

@@ -170,6 +170,15 @@ impl LocalFiles {
 
     /// The song the bar shows: the one just asked for until the player
     /// confirms it, then the player's.
+    /// The cover of the song shown, once it has loaded for that song.
+    pub fn shown_cover(&self) -> Option<&egui::TextureHandle> {
+        let track = self.shown_track()?;
+        let (serial, texture) = self.cover.as_ref()?;
+        let same_song =
+            self.status.current.as_ref().map(|current| &current.path) == Some(&track.path);
+        (*serial == self.status.track_serial && same_song).then_some(texture)
+    }
+
     pub fn shown_track(&self) -> Option<LocalTrack> {
         if let Some((generation, track, at)) = &self.expected
             && self.status.generation < *generation

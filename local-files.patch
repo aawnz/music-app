@@ -359,10 +359,88 @@ index b50faf4..a8682dc 100644
      let dim = if enabled {
          palette.secondary
 diff --git a/src/ui/sidebar.rs b/src/ui/sidebar.rs
-index 82b4ba9..555176a 100644
+index 82b4ba9..df1336f 100644
 --- a/src/ui/sidebar.rs
 +++ b/src/ui/sidebar.rs
-@@ -933,6 +933,33 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
+@@ -596,6 +596,10 @@ fn paint_grid_art_mask(app: &App, ui: &egui::Ui, rect: Rect) {
+ }
+ 
+ fn has_expanded_art(app: &App) -> bool {
++    if app.local_files.active {
++        // A local song's own cover, when it has one.
++        return app.settings.art_expanded && app.local_files.shown_cover().is_some();
++    }
+     app.settings.art_expanded
+         && app
+             .now_playing()
+@@ -610,6 +614,10 @@ fn expanded_art_side(ui: &egui::Ui) -> f32 {
+ }
+ 
+ fn paint_expanded_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
++    if app.local_files.active {
++        paint_expanded_local_art(app, ui, rect);
++        return;
++    }
+     let Some(now) = app.now_playing() else {
+         return;
+     };
+@@ -672,6 +680,55 @@ fn paint_expanded_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
+     }
+ }
+ 
++/// The local song's cover, large, with the same way back down.
++fn paint_expanded_local_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
++    let Some(texture) = app.local_files.shown_cover().cloned() else {
++        return;
++    };
++    let palette = app.palette;
++    ui.painter().add(
++        egui::epaint::Shadow {
++            offset: [0, 0],
++            blur: 28,
++            spread: 0,
++            color: egui::Color32::from_black_alpha(if palette.dark { 120 } else { 40 }),
++        }
++        .as_shape(rect, egui::CornerRadius::same(8)),
++    );
++    egui::Image::new(&texture)
++        .corner_radius(egui::CornerRadius::same(8))
++        .paint_at(ui, rect);
++    let art = ui.interact(rect, egui::Id::new("sidebar-local-art"), Sense::click());
++    let chevron_rect = Rect::from_center_size(
++        pos2(rect.right() - 16.0, rect.top() + 16.0),
++        Vec2::splat(20.0),
++    );
++    let over_chevron = ui.rect_contains_pointer(chevron_rect);
++    if art.hovered() || over_chevron {
++        let chevron = ui.interact(
++            chevron_rect,
++            egui::Id::new("sidebar-local-art-collapse"),
++            Sense::click(),
++        );
++        ui.painter().circle_filled(
++            chevron_rect.center(),
++            10.0,
++            palette.panel.gamma_multiply(0.9),
++        );
++        Icon::ChevronDown.image(palette.text, 14.0).paint_at(
++            ui,
++            Rect::from_center_size(chevron_rect.center(), Vec2::splat(14.0)),
++        );
++        if chevron.clicked() {
++            app.settings.art_expanded = false;
++            app.actions.push(Action::SettingsChanged);
++        }
++    }
++    if art.clicked() && !over_chevron {
++        app.actions.push(Action::Open(Page::LocalFiles));
++    }
++}
++
+ /// Project the playlist shelf without changing its saved order or pins.
+ /// Ownership filtering is flat, like text search, so matching playlists in
+ /// collapsed folders remain reachable. Liked Songs belongs to the account.
+@@ -933,6 +990,33 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
      {
          app.actions.push(Action::FocusSearch);
      }
