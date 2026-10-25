@@ -627,7 +627,13 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
             // the local player feeds the same sound to it.
             let behind = rect.expand2(vec2(16.0, 0.0));
             let sounding = app.local_library.shown_playing();
-            if crate::ui::player_bar::draw_visualizer(app, ui, behind, sounding) {
+            // In the colours of the song's own cover, as for Spotify's.
+            let colours = app
+                .settings
+                .accent_from_art
+                .then(|| app.local_library.shown_palette().map(<[_]>::to_vec))
+                .flatten();
+            if crate::ui::player_bar::draw_visualizer(app, ui, behind, sounding, colours) {
                 theme::visualiser_frame(ui.ctx(), app.visualiser_fps());
             }
             if app.settings.player_bar_vis_click {

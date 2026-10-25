@@ -482,6 +482,8 @@ fn leading_number(text: &str) -> Option<u32> {
 pub struct Cover {
     pub size: [usize; 2],
     pub rgba: Vec<u8>,
+    /// The cover's colours, as Spotify's covers give the visualizer.
+    pub palette: Vec<[u8; 3]>,
 }
 
 /// The picture inside the file, else a cover image beside it.
@@ -495,6 +497,7 @@ pub fn read_cover(path: &Path) -> Option<Cover> {
             Some(Cover {
                 size,
                 rgba: image.into_raw(),
+                palette: crate::images::art_palette(&bytes),
             })
         })
 }

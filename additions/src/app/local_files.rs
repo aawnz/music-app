@@ -114,6 +114,8 @@ pub struct LocalFiles {
     pub volume_preview: Option<f32>,
     /// The playing song's cover, for the song start it belongs to.
     pub cover: Option<(u64, egui::TextureHandle)>,
+    /// That cover's colours, for the visualizer.
+    cover_palette: Vec<[u8; 3]>,
     error_serial: u64,
     spotify_was_playing: bool,
     /// Listening together with friends on Spotifast.
@@ -133,6 +135,12 @@ impl LocalFiles {
 
     /// The song the bar shows: the one just asked for until the player
     /// confirms it, then the player's.
+    /// The colours of the song shown's cover, once it has loaded.
+    pub fn shown_palette(&self) -> Option<&[[u8; 3]]> {
+        (self.shown_cover().is_some() && !self.cover_palette.is_empty())
+            .then_some(self.cover_palette.as_slice())
+    }
+
     /// The cover of the song shown, once it has loaded for that song.
     pub fn shown_cover(&self) -> Option<&egui::TextureHandle> {
         let track = self.shown_track()?;
@@ -444,6 +452,10 @@ impl App {
             None
         };
         if let Some(cover) = cover {
+            self.local_library.cover_palette = cover
+                .as_ref()
+                .map(|cover| cover.palette.clone())
+                .unwrap_or_default();
             self.local_library.cover = cover.map(|cover| {
                 let pixels = cover
                     .rgba
