@@ -14,6 +14,7 @@ client) with a few additions:
   you choose another).
 - **Monthly listeners** on artist pages.
 - **Song credits.** Right-click a song and choose **Show credits**.
+- **SoundCloud.** Click **SoundCloud** in the sidebar to search SoundCloud or paste a track or playlist link, and play it in the player bar. This is unofficial: it reads SoundCloud the way its website does, so it can stop working when SoundCloud changes, and Go+ songs play only as previews.
 - **Jam with friends who use this app.** Click **Jam** in the sidebar to start one and share its code, or enter a friend's code to join. Everyone hears the same song at the same time, each on their own Spotify Premium; anyone can play, pause, skip and add songs.
 
 The last three use the same private Spotify requests as Spotify's own apps,

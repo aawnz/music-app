@@ -82,6 +82,7 @@ pub enum LocalAction {
 }
 
 pub mod jam;
+pub mod soundcloud;
 
 #[derive(Default)]
 pub struct LocalFiles {
@@ -120,6 +121,8 @@ pub struct LocalFiles {
     spotify_was_playing: bool,
     /// Listening together with friends on Spotifast.
     pub jam: jam::JamState,
+    /// The SoundCloud tab and the SoundCloud tracks it plays.
+    pub soundcloud: soundcloud::ScState,
     /// Pushed by the views, applied after the frame.
     pub actions: Vec<LocalAction>,
     /// Counts changes to `tracks`, so the index below knows to rebuild.
@@ -414,6 +417,7 @@ impl App {
         }
         self.poll_local_player(ctx);
         self.jam_frame(ctx);
+        self.sc_frame(ctx);
         // Spotify starting on its own (from a phone, the tray or Connect)
         // takes the bar back.
         let spotify_playing = self.spotify_playing();
@@ -550,7 +554,7 @@ impl App {
     }
 
     fn apply_local_action(&mut self, action: LocalAction, ctx: &egui::Context) {
-        if self.jam_take_local(&action) {
+        if self.jam_take_local(&action) || self.sc_take_local(&action, ctx) {
             return;
         }
         match action {
