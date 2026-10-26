@@ -719,6 +719,26 @@ impl fastframe_audio::Render for FileRender {
     }
 }
 
+/// Whether the player can decode `path`: it opens and gives sound.
+pub fn decodes(path: &Path, extension: &str) -> bool {
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let mut builder = rodio::Decoder::builder()
+        .with_data(BufReader::new(file))
+        .with_byte_len(len)
+        .with_seekable(true);
+    if !extension.is_empty() {
+        builder = builder.with_hint(extension);
+    }
+    builder
+        .build()
+        .is_ok_and(|decoder| decoder.take(4096).count() > 0)
+}
+
 /// Opens `path` for the device's format. Returns the stream and its length
 /// when the decoder knows it.
 fn open_stream(path: &str, format: (u32, u16)) -> Result<(Stream, Option<Duration>), String> {

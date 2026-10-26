@@ -40,6 +40,7 @@ struct Transcoding {
     url: String,
     protocol: String,
     mime: String,
+    preset: String,
 }
 
 impl Track {
@@ -201,14 +202,63 @@ impl Client {
                 return Ok(path);
             }
         }
-        let transcoding = best_transcoding(&track.transcodings)
-            .ok_or("SoundCloud doesn't offer this track in a form the app can play.")?;
-        let mut query = transcoding.url.clone();
-        if let Some(authorization) = &track.authorization {
-            let separator = if query.contains('?') { '&' } else { '?' };
-            query = format!("{query}{separator}track_authorization={authorization}");
+        // SoundCloud lists forms it no longer serves, so each is tried in
+        // turn until one downloads and decodes.
+        let candidates = ranked_transcodings(&track.transcodings);
+        if candidates.is_empty() {
+            return Err("SoundCloud doesn't offer this track in a form the app can play.".into());
         }
-        let location = self.api(&query)?["url"]
+        std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+        let mut last = String::from("SoundCloud didn't send this track.");
+        for transcoding in candidates {
+            match self.fetch(track, transcoding, &folder) {
+                Ok(path) => {
+                    if let Some(artwork) = &track.artwork
+                        && let Ok(cover) = self.get_bytes(artwork)
+                    {
+                        let _ = std::fs::write(folder.join("cover.jpg"), cover);
+                    }
+                    trim_cache(&self.cache);
+                    return Ok(path);
+                }
+                Err(error) => {
+                    log::info!(
+                        "soundcloud: {} {} {}: {error}",
+                        track.id,
+                        transcoding.protocol,
+                        transcoding.mime
+                    );
+                    last = error;
+                }
+            }
+        }
+        Err(last)
+    }
+
+    /// One form of a track's audio, downloaded and checked to play.
+    fn fetch(
+        &self,
+        track: &Track,
+        transcoding: &Transcoding,
+        folder: &Path,
+    ) -> Result<PathBuf, String> {
+        // The website asks with the client id alone; a track authorization
+        // is tried after, for tracks that want one.
+        let mut info = self.api(&transcoding.url);
+        if info.is_err()
+            && let Some(authorization) = &track.authorization
+        {
+            let separator = if transcoding.url.contains('?') {
+                '&'
+            } else {
+                '?'
+            };
+            info = self.api(&format!(
+                "{}{separator}track_authorization={authorization}",
+                transcoding.url
+            ));
+        }
+        let location = info?["url"]
             .as_str()
             .ok_or("SoundCloud didn't say where the audio is.")?
             .to_string();
@@ -229,22 +279,20 @@ impl Client {
             }
             audio
         };
-        std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
         let name = if transcoding.mime.contains("mpeg") {
             "audio.mp3"
         } else {
             "audio.m4a"
         };
-        if let Some(artwork) = &track.artwork
-            && let Ok(cover) = self.get_bytes(artwork)
-        {
-            let _ = std::fs::write(folder.join("cover.jpg"), cover);
-        }
         let path = folder.join(name);
         let partial = folder.join(format!("{name}.part"));
         std::fs::write(&partial, audio).map_err(|error| error.to_string())?;
+        // Only audio the player can decode is kept.
+        if !crate::local_files::decodes(&partial, name.rsplit('.').next().unwrap_or("")) {
+            let _ = std::fs::remove_file(&partial);
+            return Err("SoundCloud sent audio this app can't play.".into());
+        }
         std::fs::rename(&partial, &path).map_err(|error| error.to_string())?;
-        trim_cache(&self.cache);
         Ok(path)
     }
 
@@ -322,6 +370,7 @@ fn parse_track(item: &Value) -> Option<Track> {
                             .as_str()
                             .unwrap_or_default()
                             .to_string(),
+                        preset: entry["preset"].as_str().unwrap_or_default().to_string(),
                     })
                 })
                 .collect()
@@ -355,24 +404,37 @@ fn parse_track(item: &Value) -> Option<Track> {
     })
 }
 
-/// The audio to fetch: a whole MP3 file first, then an MP3 or AAC stream in
-/// pieces. Encrypted streams and Opus are left out: they don't play here.
-fn best_transcoding(list: &[Transcoding]) -> Option<&Transcoding> {
+/// The audio forms to try, best first: whole files before streams in
+/// pieces, MP3 before AAC. Encrypted streams, Opus and the "abr" streams
+/// (which yt-dlp also finds broken) are left out: they don't play here.
+fn ranked_transcodings(list: &[Transcoding]) -> Vec<&Transcoding> {
     let rank = |transcoding: &Transcoding| -> Option<u8> {
+        if transcoding.url.contains("/preset/abr") || transcoding.preset.starts_with("abr") {
+            return None;
+        }
         let mpeg = transcoding.mime.contains("mpeg");
         let aac = transcoding.mime.contains("mp4") || transcoding.mime.contains("aac");
         match (transcoding.protocol.as_str(), mpeg, aac) {
             ("progressive", true, _) => Some(0),
-            ("hls", true, _) => Some(1),
-            ("progressive", _, true) => Some(2),
+            ("progressive", _, true) => Some(1),
+            ("hls", true, _) => Some(2),
             ("hls", _, true) => Some(3),
             _ => None,
         }
     };
-    list.iter()
+    let mut ranked: Vec<(u8, &Transcoding)> = list
+        .iter()
         .filter_map(|transcoding| rank(transcoding).map(|rank| (rank, transcoding)))
-        .min_by_key(|(rank, _)| *rank)
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked
+        .into_iter()
         .map(|(_, transcoding)| transcoding)
+        .collect()
+}
+
+fn best_transcoding(list: &[Transcoding]) -> Option<&Transcoding> {
+    ranked_transcodings(list).into_iter().next()
 }
 
 /// An HLS playlist's initialisation section (for MP4 pieces) and pieces,

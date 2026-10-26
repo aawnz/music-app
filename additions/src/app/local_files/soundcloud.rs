@@ -48,6 +48,9 @@ pub struct ScState {
     fetching: HashSet<u64>,
     /// Pushed by the views, applied after the frame.
     pub actions: Vec<ScAction>,
+    /// Tracks in a row that would not play, so a broken SoundCloud stops
+    /// the queue instead of skipping through all of it.
+    failures: u32,
 }
 
 /// What the SoundCloud tab and the bar ask for.
@@ -381,6 +384,7 @@ impl App {
                             sc.ready.insert(id, path.clone());
                             if sc.loading == Some(id) {
                                 sc.loading = None;
+                                sc.failures = 0;
                                 if let Some(track) = sc.queue.get(sc.index).cloned()
                                     && track.id == id
                                 {
@@ -391,14 +395,25 @@ impl App {
                         Err(error) => {
                             if sc.loading == Some(id) {
                                 sc.loading = None;
+                                sc.failures += 1;
                                 let title = sc
                                     .queue
                                     .get(sc.index)
                                     .map(|track| track.title.clone())
                                     .unwrap_or_default();
-                                self.toast_error(format!("Couldn't play {title}: {error}"));
-                                // On to the next one, as Spotify skips what won't play.
-                                self.sc_next(ctx);
+                                if sc.failures >= 3 {
+                                    sc.active = false;
+                                    sc.failures = 0;
+                                    self.toast_error(format!(
+                                        "SoundCloud isn't sending songs right now: {error}"
+                                    ));
+                                } else {
+                                    if sc.failures == 1 {
+                                        self.toast_error(format!("Couldn't play {title}: {error}"));
+                                    }
+                                    // On to the next one, as Spotify skips what won't play.
+                                    self.sc_next(ctx);
+                                }
                             }
                         }
                     }
