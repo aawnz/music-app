@@ -120,7 +120,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::warning::The build with MilkDrop failed; building without it."
             cargo build --release --target $env:TARGET --no-default-features
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($LASTEXITCODE -ne 0) {
+              # Show the compiler's errors on the run's page, where they can
+              # be read without the full log.
+              $errors = cargo build --release --target $env:TARGET --no-default-features --message-format=short 2>&1 |
+                ForEach-Object { "$_" } | Where-Object { $_ -match "error" } | Select-Object -First 30
+              foreach ($line in $errors) { Write-Host "::error::$line" }
+              exit 1
+            }
           }
           $reported = (& "target\$env:TARGET\release\spotifast.exe" --version | Out-String).Trim()
           if ($reported -ne "spotifast $env:VERSION") { throw "The build reports '$reported'" }
