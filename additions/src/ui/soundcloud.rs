@@ -38,42 +38,47 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let locale = app.locale;
     ui.add_space(8.0);
+    // The same header as Local Files and the app's other pages.
     ui.horizontal(|ui| {
         let (tile, _) = ui.allocate_exact_size(Vec2::splat(120.0), Sense::hover());
-        ui.painter().rect_filled(
-            tile,
-            CornerRadius::same(theme::RADIUS),
-            Color32::from_rgb(255, 85, 0),
-        );
-        theme::paint_icon(ui, Icon::AudioLines, tile, 52.0, Color32::WHITE);
+        ui.painter()
+            .rect_filled(tile, CornerRadius::same(theme::RADIUS), palette.accent);
+        theme::paint_icon(ui, Icon::AudioLines, tile, 52.0, palette.on_accent);
         ui.add_space(16.0);
         ui.vertical(|ui| {
             ui.add_space(30.0);
-            theme::text(ui, "Unofficial", theme::medium(13.0), palette.secondary);
+            theme::text(ui, "Streaming from", theme::medium(13.0), palette.secondary);
             theme::text(ui, "SoundCloud", theme::bold(34.0), palette.text);
-            theme::text(
-                ui,
-                "Search, or paste a link to a track or playlist",
-                theme::regular(13.0),
-                palette.secondary,
-            );
+            let count = app.local_library.soundcloud.results.len();
+            let line = match &app.local_library.soundcloud.shown_for {
+                Some(query) if count > 0 => format!(
+                    "{count} {} for “{query}”",
+                    if count == 1 { "song" } else { "songs" }
+                ),
+                _ => "Search, or paste a link to a track or playlist".to_string(),
+            };
+            theme::text(ui, &line, theme::regular(13.0), palette.secondary);
         });
     });
     ui.add_space(16.0);
     ui.horizontal(|ui| {
-        let field = widgets::text_edit(
+        let id = egui::Id::new("soundcloud-search");
+        let field = widgets::search_field(
             ui,
+            &palette,
             locale,
-            egui::TextEdit::singleline(&mut app.local_library.soundcloud.query)
-                .hint_text("What do you want to hear?")
-                .desired_width(360.0),
+            id,
+            &mut app.local_library.soundcloud.query,
+            "Search SoundCloud, or paste a link",
+            ui.available_width().min(420.0),
         );
-        let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        if theme::pill_button(ui, &palette, "Search", true).clicked() || entered {
+        // Enter searches, as in the app's own search.
+        if field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
             push(app, ui, ScAction::Search);
         }
         if app.local_library.soundcloud.searching {
-            ui.spinner();
+            ui.add_space(8.0);
+            theme::spinner(ui, 18.0, palette.secondary);
         }
     });
     ui.add_space(12.0);
