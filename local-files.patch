@@ -1,8 +1,8 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index b9f6136..09fac18 100644
+index c7be7df..a62ee77 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -138,15 +138,16 @@ librespot-metadata = { version = "0.8", default-features = false }
+@@ -142,15 +142,16 @@ librespot-metadata = { version = "0.8", default-features = false }
  librespot-protocol = { version = "0.8", default-features = false }
  # Parses the rootlist's playlist4 protobuf, the same crate librespot generates with.
  protobuf = "3"
@@ -24,24 +24,31 @@ index b9f6136..09fac18 100644
  # `socks` is SOCKS5 proxy support for the Web API, artwork, lyrics, and
  # update checks. HTTP proxies work without it. `system-proxy` reads the OS
  # proxy on macOS and Windows when the mode is System; Linux uses environment
-@@ -180,6 +181,12 @@ rand = "0.9"
+@@ -165,7 +166,9 @@ http = "1"
+ # there and nowhere else. `net` is the local HTTP-proxy tests.
+ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util", "process"] }
+ # Soloist's loopback control API. Both already arrive through librespot.
+-tokio-tungstenite = "0.28"
++# TLS is for Spotifast Jam's relay (wss://), as librespot's own connection
++# uses it.
++tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+ futures-util = { version = "0.3", features = ["sink"] }
+ # Extract only the executable and notices from Spotify's official Soloist builds.
+ tar = { version = "0.4", default-features = false }
+@@ -193,6 +196,8 @@ rand = "0.9"
  open = "5"
  percent-encoding = "2"
  urlencoding = "2"
 +# The Music folder, offered first when adding a Local Files folder.
 +directories = "6"
-+# Spotifast Jam: the WebSocket to the Jam relay (already in the build for
-+# librespot's own connection).
-+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
-+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
  jiff = "0.2"
  mdns-sd = "0.21"
  unicode-bidi = "0.3"
 diff --git a/src/app.rs b/src/app.rs
-index 7c983e0..5b9d409 100644
+index 11ebcd5..9588ac5 100644
 --- a/src/app.rs
 +++ b/src/app.rs
-@@ -798,6 +798,10 @@ pub struct App {
+@@ -915,6 +915,10 @@ pub struct App {
      /// The window's pixels per point when it last drew, so artwork chosen
      /// away from the drawing code fits the display it lands on.
      pub pixels_per_point: f32,
@@ -52,7 +59,7 @@ index 7c983e0..5b9d409 100644
  }
  
  /// How many plays the Home shelf asks for: it shows sixteen cards.
-@@ -1322,6 +1326,8 @@ impl App {
+@@ -1516,6 +1520,8 @@ impl App {
              winamp: crate::winamp::WinampState::new(session.winamp_pos, tap, eq),
              player_bar_analyser: crate::vis::WideAnalyser::default(),
              pixels_per_point: 1.0,
@@ -61,7 +68,7 @@ index 7c983e0..5b9d409 100644
          };
          app.local.volume = app.settings.volume;
          if let Some(folder) = app.settings.local_files_folder() {
-@@ -2657,6 +2663,7 @@ impl App {
+@@ -3106,6 +3112,7 @@ impl App {
                      generation,
                      result,
                  } => self.receive_radio(&seed, generation, result),
@@ -69,7 +76,7 @@ index 7c983e0..5b9d409 100644
                  Event::Prerelease {
                      uri,
                      generation,
-@@ -3015,6 +3022,7 @@ impl App {
+@@ -3691,6 +3698,7 @@ impl App {
                  }
              }
              Page::Settings => {}
@@ -77,7 +84,7 @@ index 7c983e0..5b9d409 100644
          }
      }
  
-@@ -5271,6 +5279,7 @@ impl App {
+@@ -6488,6 +6496,7 @@ impl App {
                  }
              }
              Page::Settings => self.refresh_autostart(),
@@ -85,10 +92,10 @@ index 7c983e0..5b9d409 100644
          }
      }
  
-@@ -10866,6 +10875,11 @@ impl App {
-     /// Apply one queued UI action after drawing, updating optimistic local state
-     /// and scheduling any backend work or preference persistence it requires.
-     pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
+@@ -12429,6 +12438,11 @@ impl App {
+         {
+             return;
+         }
 +        // While a local file has the player bar, the playback keys and
 +        // controls are its own.
 +        let Some(action) = self.local_files_take(action, ctx) else {
@@ -97,15 +104,15 @@ index 7c983e0..5b9d409 100644
          if matches!(
              &action,
              Action::Open(_)
-@@ -12635,6 +12649,7 @@ impl App {
-         #[cfg(feature = "milkdrop")]
-         self.sync_milkdrop(ctx);
+@@ -14389,6 +14403,7 @@ impl App {
+             self.sync_milkdrop_pane();
+         }
          self.apply_actions(ctx);
 +        self.local_files_frame(ctx);
          self.sync_media_controls(ctx);
          self.sync_window_title(ctx);
          self.remember_geometry(ctx);
-@@ -12989,6 +13004,7 @@ impl App {
+@@ -14753,6 +14768,7 @@ impl App {
              crate::ui::show(self, ui);
          }
          self.apply_actions(ctx);
@@ -113,7 +120,7 @@ index 7c983e0..5b9d409 100644
          let autoscroll = self.autoscroll.finish(
              ctx,
              crate::autoscroll::enabled(self.settings.middle_click_autoscroll),
-@@ -13675,6 +13691,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
+@@ -15463,6 +15479,8 @@ fn cover_error(locale: Locale, error: &crate::api::client::ApiError) -> String {
      }
  }
  
@@ -123,10 +130,10 @@ index 7c983e0..5b9d409 100644
  
  #[cfg(test)]
 diff --git a/src/backend.rs b/src/backend.rs
-index d665ed7..48e4232 100644
+index 7410ac7..bd72c17 100644
 --- a/src/backend.rs
 +++ b/src/backend.rs
-@@ -926,6 +926,14 @@ pub enum Command {
+@@ -944,6 +944,14 @@ pub enum Command {
          generation: u64,
          result: Result<Box<crate::prerelease::Prerelease>, String>,
      },
@@ -141,7 +148,7 @@ index d665ed7..48e4232 100644
      /// Internal: a radio finished resolving for the session it started in.
      RadioResolved {
          session_generation: u64,
-@@ -1105,6 +1113,8 @@ pub enum Event {
+@@ -1134,6 +1142,8 @@ pub enum Event {
          generation: u64,
          result: Result<(), String>,
      },
@@ -150,7 +157,7 @@ index d665ed7..48e4232 100644
      /// Whether Spotify's internal metadata positively identifies an album as an EP.
      AlbumType {
          uri: String,
-@@ -2809,6 +2819,15 @@ impl Worker {
+@@ -2921,6 +2931,15 @@ impl Worker {
                          });
                      }
                  }
@@ -166,7 +173,7 @@ index d665ed7..48e4232 100644
                  Command::Radio { seed, generation } => {
                      self.radio_waiting.insert(seed, generation);
                      self.start_radio();
-@@ -4454,6 +4473,33 @@ impl Worker {
+@@ -4638,6 +4657,33 @@ impl Worker {
          });
      }
  
@@ -201,16 +208,18 @@ index d665ed7..48e4232 100644
          if let Some((uri, generation)) = self.prerelease_waiting.take() {
              self.emit(Event::Prerelease {
 diff --git a/src/lib.rs b/src/lib.rs
-index 7fc40ef..5347306 100644
+index 23ae8c7..ed349fe 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -16,13 +16,16 @@ pub mod demo;
+@@ -16,15 +16,18 @@ pub mod demo;
  pub mod device_history;
  pub mod emoji;
  pub mod eq;
 +pub mod extras;
  pub mod history;
  pub mod http;
+ #[cfg(target_os = "linux")]
+ pub mod hyprland;
  pub mod i18n;
  pub mod images;
 +pub mod jam;
@@ -221,16 +230,16 @@ index 7fc40ef..5347306 100644
  pub mod local_tags;
  pub mod lyrics;
  #[cfg(target_os = "macos")]
-@@ -52,6 +55,7 @@ pub mod single_instance;
- pub mod sink;
- pub mod skin;
+@@ -56,6 +59,7 @@ pub mod skin;
+ pub mod skin_previews;
+ pub mod soloist;
  pub mod sonos;
 +pub mod soundcloud;
+ mod storage;
  pub mod system_fonts;
  pub mod theme;
- pub mod thumbbar;
 diff --git a/src/model.rs b/src/model.rs
-index 19f49a7..ba820ba 100644
+index 37c11b4..15d6d03 100644
 --- a/src/model.rs
 +++ b/src/model.rs
 @@ -127,6 +127,10 @@ pub enum Page {
@@ -262,25 +271,8 @@ index 19f49a7..ba820ba 100644
              other => {
                  let (kind, id) = other.split_once(':')?;
                  match kind {
-diff --git a/src/ui/artist.rs b/src/ui/artist.rs
-index 4e28b4a..ddd6f04 100644
---- a/src/ui/artist.rs
-+++ b/src/ui/artist.rs
-@@ -324,6 +324,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
- fn artist_hero(app: &mut App, ui: &mut egui::Ui, artist: &Artist, preview: Option<&Artist>) {
-     let locale = app.locale;
-     let mut byline = Vec::new();
-+    if let Some(listeners) = app.extras.monthly_listeners(&artist.id) {
-+        byline.push((
-+            format!("{} monthly listeners", util::format_count(listeners)),
-+            None,
-+        ));
-+    }
-     if let Some(followers) = &artist.followers {
-         byline.push((
-             ngettext(
 diff --git a/src/ui/mod.rs b/src/ui/mod.rs
-index a672c89..f46cbf9 100644
+index 2504a94..0eb2477 100644
 --- a/src/ui/mod.rs
 +++ b/src/ui/mod.rs
 @@ -6,10 +6,13 @@ pub mod artist;
@@ -297,15 +289,15 @@ index a672c89..f46cbf9 100644
  pub mod login;
  mod lyrics;
  pub mod new_releases;
-@@ -21,6 +24,7 @@ pub mod search;
- pub mod settings;
- pub mod show;
+@@ -23,6 +26,7 @@ pub mod show;
  pub mod sidebar;
+ pub mod skin_cards;
+ mod soloist;
 +mod soundcloud;
  pub mod topbar;
  mod update;
  pub mod widgets;
-@@ -65,7 +69,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -91,7 +95,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
              ),
          );
      }
@@ -318,7 +310,7 @@ index a672c89..f46cbf9 100644
      if app.lyrics_fullscreen.is_some() {
          lyrics::fullscreen(app, ui);
      } else {
-@@ -86,6 +94,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -112,6 +120,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
      keep_room_for_panels(app, ctx);
      devices::popup(app, ctx);
      dialogs::show(app, ctx);
@@ -327,7 +319,7 @@ index a672c89..f46cbf9 100644
      update::show(app, ctx);
      widgets::drag_ghost(ctx, &app.palette, app.locale);
      toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
-@@ -285,7 +295,12 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -311,7 +321,12 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
              let page = app.page().clone();
              let overview = matches!(
                  page,
@@ -341,24 +333,24 @@ index a672c89..f46cbf9 100644
              );
              // The wash belongs to the page's hero, so it scrolls away with
              // it. The page's offset is known once it has been laid out, so
-@@ -345,6 +360,8 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
-                                 Page::Radio(seed) => radio::radio(app, ui, &seed),
-                                 Page::Queue => queue::page(app, ui),
-                                 Page::Settings => settings::show(app, ui),
-+                                Page::LocalFiles => local_files::page(app, ui),
-+                                Page::SoundCloud => soundcloud::page(app, ui),
-                             }
-                         });
-                     if app.dialog.is_none() && !app.show_devices {
+@@ -378,6 +393,8 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+                             Page::Radio(seed) => radio::radio(app, ui, &seed),
+                             Page::Queue => queue::page(app, ui),
+                             Page::Settings => settings::show(app, ui),
++                            Page::LocalFiles => local_files::page(app, ui),
++                            Page::SoundCloud => soundcloud::page(app, ui),
+                         }
+                     });
+                 if app.dialog.is_none() && !app.show_devices {
 diff --git a/src/ui/player_bar.rs b/src/ui/player_bar.rs
-index 5ff61d6..d4acaa9 100644
+index 6873ef9..7809c47 100644
 --- a/src/ui/player_bar.rs
 +++ b/src/ui/player_bar.rs
 @@ -125,12 +125,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
  /// same post-equalizer, pre-volume sound as the mini player's visualizer,
  /// so the volume never moves it. Returns whether it is still moving.
  fn visualizer(app: &mut App, ui: &egui::Ui, rect: Rect, now: Option<&NowPlaying>) -> bool {
-+    let sounding = now.is_some_and(|now| (now.playing || now.loading) && now.local);
++    let sounding = app.visualizer_sounding(now);
 +    let palette = app.now_playing_palette().map(<[_]>::to_vec);
 +    draw_visualizer(app, ui, rect, sounding, palette)
 +}
@@ -375,7 +367,7 @@ index 5ff61d6..d4acaa9 100644
      use crate::settings::PlayerBarVis;
      use crate::vis;
      let mode = app.settings.player_bar_vis;
--    let sounding = now.is_some_and(|now| (now.playing || now.loading) && now.local);
+-    let sounding = app.visualizer_sounding(now);
      let dark = ui.visuals().dark_mode;
 -    let colours = vis_colours(app.now_playing_palette(), app.palette.accent, dark);
 +    let colours = vis_colours(palette.as_deref(), app.palette.accent, dark);
@@ -383,7 +375,7 @@ index 5ff61d6..d4acaa9 100644
      // would wash it out.
      let strength = if dark { 1.0 } else { LIGHT_STRENGTH };
 diff --git a/src/ui/sidebar.rs b/src/ui/sidebar.rs
-index ca1b465..779899c 100644
+index 04bf637..5a3a1bf 100644
 --- a/src/ui/sidebar.rs
 +++ b/src/ui/sidebar.rs
 @@ -636,6 +636,10 @@ fn paint_grid_art_mask(app: &App, ui: &egui::Ui, rect: Rect) {
@@ -462,9 +454,9 @@ index ca1b465..779899c 100644
 +}
 +
  /// Project the playlist shelf without changing its saved order or pins.
- /// Ownership filtering is flat, like text search, so matching playlists in
- /// collapsed folders remain reachable. Liked Songs belongs to the account.
-@@ -983,6 +1040,44 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
+ /// The Spotify order keeps the folder tree; ownership filtering then hides
+ /// playlists the account does not own and folders left empty, with counts
+@@ -1060,6 +1117,44 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
      {
          app.actions.push(Action::FocusSearch);
      }
@@ -510,10 +502,10 @@ index ca1b465..779899c 100644
      ui.painter().hline(
          ui.max_rect().x_range().shrink(4.0),
 diff --git a/src/ui/widgets.rs b/src/ui/widgets.rs
-index ac9ffb1..e5d4fe5 100644
+index b68d27c..2cffcd2 100644
 --- a/src/ui/widgets.rs
 +++ b/src/ui/widgets.rs
-@@ -526,7 +526,7 @@ pub fn menu_submenu<R>(
+@@ -531,7 +531,7 @@ pub fn menu_submenu<R>(
  /// A submenu that holds a field to type in. A click inside it focuses the
  /// field or scrolls its list instead of closing the menu; its entries still
  /// close the menu when chosen.
@@ -522,7 +514,7 @@ index ac9ffb1..e5d4fe5 100644
      ui: &mut Ui,
      palette: &Palette,
      icon: Option<Icon>,
-@@ -1021,6 +1021,13 @@ fn item_menu_at(
+@@ -1026,6 +1026,13 @@ fn item_menu_at(
              app.actions.push(Action::ToggleSaved(uri.clone()));
          }
          add_to_playlist_menu(ui, app, std::slice::from_ref(item));
@@ -536,7 +528,7 @@ index ac9ffb1..e5d4fe5 100644
      } else if menu_item(
          ui,
          &palette,
-@@ -1318,6 +1325,26 @@ pub(crate) fn row_playable(item: &PlayableItem) -> bool {
+@@ -1358,6 +1365,26 @@ pub(crate) fn row_playable(item: &PlayableItem) -> bool {
              if track.is_local || track.is_playable == Some(false))
  }
  
@@ -563,7 +555,7 @@ index ac9ffb1..e5d4fe5 100644
  /// Describes one row of a track table.
  pub struct TrackRow<'a> {
      pub index: usize,
-@@ -1495,7 +1522,14 @@ fn track_row_contents(
+@@ -1535,7 +1562,14 @@ fn track_row_contents(
      let width = ui.available_width();
      let (rect, response) = ui.allocate_exact_size(vec2(width, row_height), Sense::click_and_drag());
      let rect = rect.translate(vec2(0.0, row.shift));
@@ -579,7 +571,7 @@ index ac9ffb1..e5d4fe5 100644
      response.widget_info(|| {
          egui::WidgetInfo::selected(
              egui::WidgetType::Button,
-@@ -1563,13 +1597,27 @@ fn track_row_contents(
+@@ -1603,13 +1637,27 @@ fn track_row_contents(
      // A song started from one of its copies in this list marks that copy
      // alone: the others are other places in the list.
      let played_copy = app.row_is_played_copy(row.context, row.index, row.item.uri());
@@ -614,7 +606,7 @@ index ac9ffb1..e5d4fe5 100644
      let hovered = ui.is_enabled() && (ui.rect_contains_pointer(rect) || response.has_focus());
      if row.picked {
          // Keep the existing translucent selection, using a neutral palette
-@@ -2061,11 +2109,7 @@ fn track_row_contents(
+@@ -2101,11 +2149,7 @@ fn track_row_contents(
      let mut pick = None;
      let accessible_click = response.clicked() && response.interact_pointer_pos().is_none();
      if ui.is_enabled() && (response.double_clicked() || accessible_click) && !unavailable {
@@ -627,7 +619,7 @@ index ac9ffb1..e5d4fe5 100644
      } else if ui.is_enabled() && response.clicked() {
          // The cell that holds the play control: the number column when
          // there is one, the cover when there is not.
-@@ -2086,11 +2130,7 @@ fn track_row_contents(
+@@ -2126,11 +2170,7 @@ fn track_row_contents(
              if is_current {
                  app.actions.push(Action::TogglePlay);
              } else {
