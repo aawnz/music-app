@@ -45,7 +45,7 @@ index c7be7df..a62ee77 100644
  mdns-sd = "0.21"
  unicode-bidi = "0.3"
 diff --git a/src/app.rs b/src/app.rs
-index 11ebcd5..9588ac5 100644
+index 11ebcd5..d90b5f9 100644
 --- a/src/app.rs
 +++ b/src/app.rs
 @@ -915,6 +915,10 @@ pub struct App {
@@ -80,7 +80,7 @@ index 11ebcd5..9588ac5 100644
                  }
              }
              Page::Settings => {}
-+            Page::LocalFiles | Page::SoundCloud => {}
++            Page::LocalFiles => {}
          }
      }
  
@@ -88,7 +88,7 @@ index 11ebcd5..9588ac5 100644
                  }
              }
              Page::Settings => self.refresh_autostart(),
-+            Page::LocalFiles | Page::SoundCloud => {}
++            Page::LocalFiles => {}
          }
      }
  
@@ -208,7 +208,7 @@ index 7410ac7..bd72c17 100644
          if let Some((uri, generation)) = self.prerelease_waiting.take() {
              self.emit(Event::Prerelease {
 diff --git a/src/lib.rs b/src/lib.rs
-index 23ae8c7..ed349fe 100644
+index 23ae8c7..87582ba 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -16,15 +16,18 @@ pub mod demo;
@@ -230,49 +230,37 @@ index 23ae8c7..ed349fe 100644
  pub mod local_tags;
  pub mod lyrics;
  #[cfg(target_os = "macos")]
-@@ -56,6 +59,7 @@ pub mod skin;
- pub mod skin_previews;
- pub mod soloist;
- pub mod sonos;
-+pub mod soundcloud;
- mod storage;
- pub mod system_fonts;
- pub mod theme;
 diff --git a/src/model.rs b/src/model.rs
-index 37c11b4..15d6d03 100644
+index 37c11b4..03c93e0 100644
 --- a/src/model.rs
 +++ b/src/model.rs
-@@ -127,6 +127,10 @@ pub enum Page {
+@@ -127,6 +127,8 @@ pub enum Page {
      Radio(String),
      Queue,
      Settings,
 +    /// Songs from folders on this computer.
 +    LocalFiles,
-+    /// SoundCloud's tracks, searched and played here.
-+    SoundCloud,
  }
  
  impl Page {
-@@ -148,6 +152,8 @@ impl Page {
+@@ -148,6 +150,7 @@ impl Page {
              Page::Radio(seed) => format!("radio:{seed}"),
              Page::Queue => "queue".into(),
              Page::Settings => "settings".into(),
 +            Page::LocalFiles => "local-files".into(),
-+            Page::SoundCloud => "soundcloud".into(),
          }
      }
  
-@@ -164,6 +170,8 @@ impl Page {
+@@ -164,6 +167,7 @@ impl Page {
              "episodes" => Page::Episodes,
              "queue" => Page::Queue,
              "settings" => Page::Settings,
 +            "local-files" => Page::LocalFiles,
-+            "soundcloud" => Page::SoundCloud,
              other => {
                  let (kind, id) = other.split_once(':')?;
                  match kind {
 diff --git a/src/ui/mod.rs b/src/ui/mod.rs
-index 2504a94..0eb2477 100644
+index 2504a94..6d1a83b 100644
 --- a/src/ui/mod.rs
 +++ b/src/ui/mod.rs
 @@ -6,10 +6,13 @@ pub mod artist;
@@ -289,15 +277,7 @@ index 2504a94..0eb2477 100644
  pub mod login;
  mod lyrics;
  pub mod new_releases;
-@@ -23,6 +26,7 @@ pub mod show;
- pub mod sidebar;
- pub mod skin_cards;
- mod soloist;
-+mod soundcloud;
- pub mod topbar;
- mod update;
- pub mod widgets;
-@@ -91,7 +95,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -91,7 +94,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
              ),
          );
      }
@@ -310,7 +290,7 @@ index 2504a94..0eb2477 100644
      if app.lyrics_fullscreen.is_some() {
          lyrics::fullscreen(app, ui);
      } else {
-@@ -112,6 +120,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
+@@ -112,6 +119,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
      keep_room_for_panels(app, ctx);
      devices::popup(app, ctx);
      dialogs::show(app, ctx);
@@ -319,26 +299,20 @@ index 2504a94..0eb2477 100644
      update::show(app, ctx);
      widgets::drag_ghost(ctx, &app.palette, app.locale);
      toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
-@@ -311,7 +321,12 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -311,7 +320,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
              let page = app.page().clone();
              let overview = matches!(
                  page,
 -                Page::Home | Page::Search | Page::Settings | Page::Queue
-+                Page::Home
-+                    | Page::Search
-+                    | Page::Settings
-+                    | Page::Queue
-+                    | Page::LocalFiles
-+                    | Page::SoundCloud
++                Page::Home | Page::Search | Page::Settings | Page::Queue | Page::LocalFiles
              );
              // The wash belongs to the page's hero, so it scrolls away with
              // it. The page's offset is known once it has been laid out, so
-@@ -378,6 +393,8 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
+@@ -378,6 +387,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                              Page::Radio(seed) => radio::radio(app, ui, &seed),
                              Page::Queue => queue::page(app, ui),
                              Page::Settings => settings::show(app, ui),
 +                            Page::LocalFiles => local_files::page(app, ui),
-+                            Page::SoundCloud => soundcloud::page(app, ui),
                          }
                      });
                  if app.dialog.is_none() && !app.show_devices {
@@ -375,7 +349,7 @@ index 6873ef9..7809c47 100644
      // would wash it out.
      let strength = if dark { 1.0 } else { LIGHT_STRENGTH };
 diff --git a/src/ui/sidebar.rs b/src/ui/sidebar.rs
-index 04bf637..5a3a1bf 100644
+index 04bf637..b0491d4 100644
 --- a/src/ui/sidebar.rs
 +++ b/src/ui/sidebar.rs
 @@ -636,6 +636,10 @@ fn paint_grid_art_mask(app: &App, ui: &egui::Ui, rect: Rect) {
@@ -456,7 +430,7 @@ index 04bf637..5a3a1bf 100644
  /// Project the playlist shelf without changing its saved order or pins.
  /// The Spotify order keeps the folder tree; ownership filtering then hides
  /// playlists the account does not own and folders left empty, with counts
-@@ -1060,6 +1117,44 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
+@@ -1060,6 +1117,33 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
      {
          app.actions.push(Action::FocusSearch);
      }
@@ -470,17 +444,6 @@ index 04bf637..5a3a1bf 100644
 +    .clicked()
 +    {
 +        app.actions.push(Action::Open(Page::LocalFiles));
-+    }
-+    if nav_row(
-+        ui,
-+        &palette,
-+        Icon::AudioLines,
-+        "SoundCloud",
-+        page == Page::SoundCloud,
-+    )
-+    .clicked()
-+    {
-+        app.actions.push(Action::Open(Page::SoundCloud));
 +    }
 +    // Listening together with friends who use Spotifast.
 +    let jam_label = match app.local_library.jam.session.as_ref().filter(|s| s.joined) {
